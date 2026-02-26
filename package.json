@@ -1,6 +1,6 @@
 {
   "name": "agentaudit",
-  "version": "3.12.7",
+  "version": "3.12.9",
   "description": "Security scanner for AI packages — MCP server + CLI",
   "type": "module",
   "bin": {
@@ -39,7 +39,7 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agentaudit-dev/agentaudit-mcp.git"
+    "url": "git+https://github.com/agentaudit-dev/agentaudit-cli.git"
   },
   "homepage": "https://agentaudit.dev",
   "engines": {

@@ -11,7 +11,7 @@
 Scan MCP servers, AI skills, and packages for vulnerabilities, prompt injection,
 and supply chain attacks. Powered by regex static analysis and deep LLM audits.
 
-[![AgentAudit](https://www.agentaudit.dev/api/badge/agentaudit-mcp)](https://www.agentaudit.dev/skills/agentaudit-mcp)
+[![AgentAudit](https://www.agentaudit.dev/api/badge/agentaudit-mcp)](https://www.agentaudit.dev/packages/agentaudit-mcp)
 [![npm version](https://img.shields.io/npm/v/agentaudit?style=for-the-badge&color=CB3837&logo=npm)](https://www.npmjs.com/package/agentaudit)
 [![Trust Registry](https://img.shields.io/badge/Trust_Registry-Live-00C853?style=for-the-badge)](https://agentaudit.dev)
 [![License](https://img.shields.io/badge/License-AGPL_3.0-F9A825?style=for-the-badge)](LICENSE)
@@ -77,7 +77,7 @@ agentaudit lookup fastmcp
 
 **Example output:**
 ```
-  ⛨ AgentAudit v3.10.4  │  my-scanner #3 · 280pts · 19 audits
+  ⛨ AgentAudit v3.12.9  │  my-scanner #3 · 280pts · 19 audits
 
   Discovering MCP servers in your AI editors...
 
@@ -227,7 +227,7 @@ Then ask your agent: *"Check which MCP servers I have installed and audit any un
 | Command | Alias | Description |
 |---------|-------|-------------|
 | `agentaudit model` | — | Interactive LLM provider + model configuration |
-| `agentaudit setup` | — | Register agent + configure API key for registry uploads |
+| `agentaudit setup` | `login` | Sign in with GitHub OAuth or paste API key manually |
 | `agentaudit status` | `whoami` | Show current config, API keys, and personal stats |
 
 ### Global Flags
@@ -481,7 +481,7 @@ agentaudit search fastmcp --json    # Machine-readable search results
 
 AgentAudit stores credentials in `~/.config/agentaudit/credentials.json` (or `$XDG_CONFIG_HOME/agentaudit/credentials.json`).
 
-Run `agentaudit setup` to configure interactively, or set via environment:
+Run `agentaudit setup` to sign in with GitHub or paste an API key, or set via environment:
 
 ```bash
 export AGENTAUDIT_API_KEY=asf_your_key_here
@@ -595,10 +595,10 @@ It checks standard config file locations for Claude Desktop, Cursor, VS Code, an
 | | Project | Description |
 |---|---------|-------------|
 | 🌐 | [agentaudit.dev](https://agentaudit.dev) | Trust Registry -- browse packages, findings, leaderboard |
-| 🛡️ | [agentaudit-skill](https://github.com/starbuck100/agentaudit-skill) | Agent Skill -- pre-install security gate for Claude Code, Cursor, Windsurf |
-| ⚡ | [agentaudit-github-action](https://github.com/ecap0-ai/agentaudit-github-action) | GitHub Action -- CI/CD security scanning |
-| 📚 | [agentaudit-mcp](https://github.com/ecap0-ai/agentaudit-mcp) | This repo -- CLI + MCP server source |
-| 🐛 | [Report Issues](https://github.com/ecap0-ai/agentaudit-mcp/issues) | Bug reports and feature requests |
+| 🛡️ | [agentaudit-skill](https://github.com/agentaudit-dev/agentaudit-skill) | Agent Skill -- pre-install security gate for Claude Code, Cursor, Windsurf |
+| ⚡ | [agentaudit-github-action](https://github.com/agentaudit-dev/agentaudit-github-action) | GitHub Action -- CI/CD security scanning |
+| 📚 | [agentaudit-cli](https://github.com/agentaudit-dev/agentaudit-cli) | This repo -- CLI + MCP server source |
+| 🐛 | [Report Issues](https://github.com/agentaudit-dev/agentaudit-cli/issues) | Bug reports and feature requests |
 
 ---
 
@@ -612,6 +612,6 @@ It checks standard config file locations for Claude Desktop, Cursor, VS Code, an
 
 **Protect your AI stack. Scan before you trust.**
 
-[Trust Registry](https://agentaudit.dev) · [Leaderboard](https://agentaudit.dev/leaderboard) · [Report Issues](https://github.com/ecap0-ai/agentaudit-mcp/issues)
+[Trust Registry](https://agentaudit.dev) · [Leaderboard](https://agentaudit.dev/leaderboard) · [Report Issues](https://github.com/agentaudit-dev/agentaudit-cli/issues)
 
 </div>
