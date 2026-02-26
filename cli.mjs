@@ -2988,6 +2988,9 @@ function enrichFindings(report, files, pkgInfo) {
 // ── SARIF 2.1.0 output ────────────────────────────────
 
 function toSarif(reports) {
+  if (!reports || (Array.isArray(reports) && reports.length === 0)) {
+    reports = [];
+  }
   const version = getVersion();
   const LEVEL_MAP = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' };
   const SCORE_MAP = { critical: '9.5', high: '8.0', medium: '5.5', low: '2.0', info: '0.5' };
@@ -2995,7 +2998,7 @@ function toSarif(reports) {
   const results = [];
   const ruleIndex = new Map();
 
-  for (const report of (Array.isArray(reports) ? reports : [reports])) {
+  for (const report of (Array.isArray(reports) ? reports : [reports]).filter(Boolean)) {
     for (const f of (report.findings || [])) {
       const ruleId = f.pattern_id || f.id || 'UNKNOWN';
       const sev = (f.severity || 'medium').toLowerCase();
@@ -3057,6 +3060,12 @@ function toSarif(reports) {
           .update(`${ruleId}:${filePath}:${lineNum}`)
           .digest('hex').slice(0, 16);
         result.partialFingerprints = { primaryLocationLineHash: hash };
+      } else {
+        // Fallback fingerprint from rule + title for findings without file/line
+        const hash = crypto.createHash('sha256')
+          .update(`${ruleId}:${f.title || ''}`)
+          .digest('hex').slice(0, 16);
+        result.partialFingerprints = { primaryLocationLineHash: hash };
       }
 
       results.push(result);
@@ -3081,6 +3090,15 @@ function toSarif(reports) {
 }
 
 async function auditRepo(url) {
+  // In quiet mode (SARIF/JSON), redirect all progress output to stderr
+  // so stdout only contains clean machine-readable data
+  const _origConsoleLog = console.log;
+  const _origStdoutWrite = process.stdout.write;
+  if (quietMode) {
+    console.log = console.error;
+    process.stdout.write = process.stderr.write.bind(process.stderr);
+  }
+  try {
   const start = Date.now();
 
   // Support local directories
@@ -3504,6 +3522,11 @@ async function auditRepo(url) {
 
   console.log();
   return report;
+
+  } finally {
+    console.log = _origConsoleLog;
+    process.stdout.write = _origStdoutWrite;
+  }
 }
 
 // ── Check command ───────────────────────────────────────
@@ -4395,6 +4418,12 @@ async function main() {
   const formatFlag = formatIdx !== -1 ? args.splice(formatIdx, 2)[1] : null;
   // --json is alias for --format json
   const outputFormat = formatFlag || (jsonMode ? 'json' : null);
+  // Validate --format value
+  if (outputFormat && !['json', 'sarif'].includes(outputFormat)) {
+    console.error(`  ${c.red}Unknown format: ${outputFormat}${c.reset}`);
+    console.error(`  ${c.dim}Supported formats: json, sarif${c.reset}`);
+    process.exitCode = 2; return;
+  }
   // SARIF mode: suppress console output so only clean JSON goes to stdout
   if (outputFormat === 'sarif') { quietMode = true; jsonMode = true; }
   
