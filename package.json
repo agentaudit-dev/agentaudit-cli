@@ -1,7 +1,7 @@
 {
   "name": "agentaudit",
   "version": "3.12.9",
-  "description": "Security scanner for AI packages — MCP server + CLI",
+  "description": "Security scanner for AI agent packages — CLI + MCP server",
   "type": "module",
   "bin": {
     "agentaudit": "cli.mjs"

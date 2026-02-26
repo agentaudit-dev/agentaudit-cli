@@ -6,7 +6,7 @@
 
 # 🛡️ AgentAudit
 
-**Security scanner for AI packages — MCP server + CLI**
+**Security scanner for AI agent packages — CLI + MCP server**
 
 Scan MCP servers, AI skills, and packages for vulnerabilities, prompt injection,
 and supply chain attacks. Powered by regex static analysis and deep LLM audits.
