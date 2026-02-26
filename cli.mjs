@@ -21,7 +21,7 @@
  *   profile               Your profile — rank, points, audit stats
  *   help [command]        Show help
  *
- * Flags: --json, --quiet, --no-color, --no-upload, --model, --export, --debug
+ * Flags: --json, --quiet, --no-color, --no-upload, --model, --export, --format, --debug
  */
 
 import fs from 'fs';
@@ -2985,6 +2985,101 @@ function enrichFindings(report, files, pkgInfo) {
   return report;
 }
 
+// ── SARIF 2.1.0 output ────────────────────────────────
+
+function toSarif(reports) {
+  const version = getVersion();
+  const LEVEL_MAP = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' };
+  const SCORE_MAP = { critical: '9.5', high: '8.0', medium: '5.5', low: '2.0', info: '0.5' };
+  const rules = [];
+  const results = [];
+  const ruleIndex = new Map();
+
+  for (const report of (Array.isArray(reports) ? reports : [reports])) {
+    for (const f of (report.findings || [])) {
+      const ruleId = f.pattern_id || f.id || 'UNKNOWN';
+      const sev = (f.severity || 'medium').toLowerCase();
+
+      if (!ruleIndex.has(ruleId)) {
+        ruleIndex.set(ruleId, rules.length);
+        const tags = ['security'];
+        if (f.cwe_id) tags.push(f.cwe_id.toLowerCase());
+        if (f.category) tags.push(f.category);
+        rules.push({
+          id: ruleId,
+          shortDescription: { text: f.title || ruleId },
+          fullDescription: { text: f.description || f.title || '' },
+          helpUri: f.cwe_id
+            ? `https://cwe.mitre.org/data/definitions/${f.cwe_id.replace('CWE-', '')}.html`
+            : `https://agentaudit.dev`,
+          defaultConfiguration: { level: LEVEL_MAP[sev] || 'warning' },
+          properties: { 'security-severity': SCORE_MAP[sev] || '5.5', tags },
+        });
+      }
+
+      const result = {
+        ruleId,
+        ruleIndex: ruleIndex.get(ruleId),
+        level: LEVEL_MAP[sev] || 'warning',
+        message: { text: [f.title, f.description].filter(Boolean).join(': ') },
+        locations: [],
+      };
+
+      const filePath = f.file || f.file_path;
+      const lineNum = f.line || f.line_start;
+      if (filePath) {
+        const loc = {
+          physicalLocation: {
+            artifactLocation: { uri: filePath, uriBaseId: '%SRCROOT%' },
+          },
+        };
+        if (lineNum) {
+          loc.physicalLocation.region = { startLine: lineNum };
+        }
+        const snippet = f.content || f.snippet || f.code_snippet;
+        if (snippet) {
+          loc.physicalLocation.region = loc.physicalLocation.region || {};
+          loc.physicalLocation.region.snippet = { text: snippet };
+        }
+        result.locations.push(loc);
+      }
+
+      if (f.remediation) {
+        result.fixes = [{ description: { text: f.remediation } }];
+      }
+
+      if (f.by_design) {
+        result.suppressions = [{ kind: 'inSource', justification: 'Marked as by-design' }];
+      }
+
+      if (filePath && lineNum) {
+        const hash = crypto.createHash('sha256')
+          .update(`${ruleId}:${filePath}:${lineNum}`)
+          .digest('hex').slice(0, 16);
+        result.partialFingerprints = { primaryLocationLineHash: hash };
+      }
+
+      results.push(result);
+    }
+  }
+
+  return {
+    version: '2.1.0',
+    $schema: 'https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json',
+    runs: [{
+      tool: {
+        driver: {
+          name: 'AgentAudit',
+          semanticVersion: version,
+          informationUri: 'https://agentaudit.dev',
+          rules,
+        },
+      },
+      results,
+    }],
+  };
+}
+
 async function auditRepo(url) {
   const start = Date.now();
 
@@ -4286,8 +4381,8 @@ async function main() {
   jsonMode = rawArgs.includes('--json');
   quietMode = rawArgs.includes('--quiet') || rawArgs.includes('-q');
   // --no-color already handled at top level for `c` object
-  
-  // Strip global flags from args (including --model <value>)
+
+  // Strip global flags from args (including --model <value>, --format <value>)
   const globalFlags = new Set(['--json', '--quiet', '-q', '--no-color', '--no-upload']);
   let args = rawArgs.filter(a => !globalFlags.has(a));
   // Remove --model <value> and --models <value> pairs
@@ -4295,6 +4390,13 @@ async function main() {
   if (modelIdx !== -1) args.splice(modelIdx, 2);
   const modelsIdx = args.indexOf('--models');
   if (modelsIdx !== -1) args.splice(modelsIdx, 2);
+  // Remove --format <value> pair
+  const formatIdx = args.indexOf('--format');
+  const formatFlag = formatIdx !== -1 ? args.splice(formatIdx, 2)[1] : null;
+  // --json is alias for --format json
+  const outputFormat = formatFlag || (jsonMode ? 'json' : null);
+  // SARIF mode: suppress console output so only clean JSON goes to stdout
+  if (outputFormat === 'sarif') { quietMode = true; jsonMode = true; }
   
   // Detect per-command --help BEFORE stripping (e.g. `agentaudit model --help`)
   const wantsHelp = args.includes('--help') || args.includes('-h');
@@ -4331,12 +4433,14 @@ async function main() {
       `(command injection, eval, hardcoded secrets, path traversal, etc.)`,
       ``,
       `${c.bold}Options:${c.reset}`,
-      `  --deep         Run deep LLM audit instead (same as \`agentaudit audit\`)`,
+      `  --deep             Run deep LLM audit instead (same as \`agentaudit audit\`)`,
+      `  --format sarif      Output results as SARIF 2.1.0 (for GitHub Code Scanning)`,
       ``,
       `${c.bold}Examples:${c.reset}`,
       `  agentaudit scan https://github.com/owner/repo`,
       `  agentaudit scan https://github.com/a/b https://github.com/c/d`,
       `  agentaudit scan https://github.com/owner/repo --deep`,
+      `  agentaudit scan https://github.com/owner/repo --format sarif > results.sarif`,
     ],
     audit: [
       `${c.bold}agentaudit audit${c.reset} <url> [url...] [options]`,
@@ -4348,12 +4452,14 @@ async function main() {
       `  --models <a,b,c>   Multi-model audit (parallel calls, consensus comparison)`,
       `  --no-upload        Skip uploading report to registry`,
       `  --export           Export audit payload as markdown (for manual LLM review)`,
+      `  --format sarif      Output results as SARIF 2.1.0 (for GitHub Code Scanning)`,
       `  --debug            Show raw LLM response on parse errors`,
       ``,
       `${c.bold}Examples:${c.reset}`,
       `  agentaudit audit https://github.com/owner/repo`,
       `  agentaudit audit https://github.com/owner/repo --model gpt-4o`,
       `  agentaudit audit https://github.com/owner/repo --models gemini-2.5-flash,claude-sonnet-4-20250514`,
+      `  agentaudit audit https://github.com/owner/repo --format sarif > results.sarif`,
       `  agentaudit audit https://github.com/owner/repo --export`,
     ],
     lookup: [
@@ -5282,9 +5388,19 @@ async function main() {
     // --deep redirects to audit flow
     if (deepFlag) {
       let hasFindings = false;
+      const allReports = [];
       for (const url of urls) {
         const report = await auditRepo(url);
-        if (report?.findings?.length > 0) hasFindings = true;
+        if (Array.isArray(report)) {
+          allReports.push(...report.filter(Boolean));
+          if (report.some(r => r?.findings?.length > 0)) hasFindings = true;
+        } else if (report) {
+          allReports.push(report);
+          if (report.findings?.length > 0) hasFindings = true;
+        }
+      }
+      if (outputFormat === 'sarif') {
+        console.log(JSON.stringify(toSarif(allReports), null, 2));
       }
       process.exitCode = hasFindings ? 1 : 0;
       return;
@@ -5298,7 +5414,12 @@ async function main() {
       else hadErrors = true;
     }
     
-    if (jsonMode) {
+    if (outputFormat === 'sarif') {
+      const sarif = toSarif(results.map(r => ({
+        findings: (r.findings || []).map(f => ({ ...f, pattern_id: f.id })),
+      })));
+      console.log(JSON.stringify(sarif, null, 2));
+    } else if (jsonMode || outputFormat === 'json') {
       const jsonOut = results.map(r => ({
         slug: r.slug,
         url: r.url,
@@ -5332,17 +5453,26 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    
+
     let hasFindings = false;
+    const allReports = [];
     for (const url of urls) {
       const result = await auditRepo(url);
       // Multi-model returns array, single-model returns object
       if (Array.isArray(result)) {
+        allReports.push(...result.filter(Boolean));
         if (result.some(r => r?.findings?.length > 0)) hasFindings = true;
-      } else if (result?.findings?.length > 0) {
-        hasFindings = true;
+      } else if (result) {
+        allReports.push(result);
+        if (result.findings?.length > 0) hasFindings = true;
       }
     }
+
+    if (outputFormat === 'sarif') {
+      const sarif = toSarif(allReports);
+      console.log(JSON.stringify(sarif, null, 2));
+    }
+
     process.exitCode = hasFindings ? 1 : 0;
     return;
   }
