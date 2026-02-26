@@ -516,12 +516,12 @@ async function validateApiKey(apiKey) {
 
 async function setupCommand() {
   console.log(`  ${c.bold}AgentAudit Setup${c.reset}`);
-  console.log(`  ${c.dim}Link your API key to upload audit reports to agentaudit.dev${c.reset}`);
+  console.log(`  ${c.dim}Sign in to upload audit reports to agentaudit.dev${c.reset}`);
   console.log();
 
   const existing = loadCredentials();
   if (existing) {
-    console.log(`  ${icons.safe}  Already configured as ${c.bold}${existing.agent_name}${c.reset}`);
+    console.log(`  ${icons.safe}  Already logged in as ${c.bold}${existing.agent_name}${c.reset}`);
     console.log(`  ${c.dim}Key: ${existing.api_key.slice(0, 12)}...${c.reset}`);
     console.log();
     const answer = await askQuestion(`  Reconfigure? ${c.dim}(y/N)${c.reset} `);
@@ -532,6 +532,25 @@ async function setupCommand() {
     console.log();
   }
 
+  // Offer choice: GitHub OAuth (recommended) or manual API key
+  console.log(`  ${c.bold}How do you want to sign in?${c.reset}`);
+  console.log();
+  console.log(`  ${c.cyan}1${c.reset}  Sign in with GitHub ${c.dim}(recommended — opens browser)${c.reset}`);
+  console.log(`  ${c.cyan}2${c.reset}  Paste an API key manually ${c.dim}(from ${REGISTRY_URL}/profile)${c.reset}`);
+  console.log();
+  const choice = await askQuestion(`  Choice ${c.dim}(1/2, default: 1):${c.reset} `);
+  console.log();
+
+  if (choice.trim() === '2') {
+    // ── Manual API key flow ──
+    await setupManualKey();
+  } else {
+    // ── GitHub OAuth Device Flow (default) ──
+    await loginCommand();
+  }
+}
+
+async function setupManualKey() {
   console.log(`  ${c.bold}Step 1:${c.reset} Create an API key at ${c.cyan}${REGISTRY_URL}/profile${c.reset}`);
   console.log(`  ${c.dim}Sign in with GitHub, then click "Create API Key".${c.reset}`);
   console.log();
@@ -556,6 +575,10 @@ async function setupCommand() {
     return;
   }
 
+  setupReadyMessage();
+}
+
+function setupReadyMessage() {
   console.log();
 
   // ── LLM configuration hint ──
@@ -633,9 +656,14 @@ async function loginCommand() {
 
   // Try to auto-open browser
   try {
-    const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
     const { exec } = await import('child_process');
-    exec(`${openCmd} "${verifyUrl}"`);
+    if (process.platform === 'darwin') {
+      exec(`open "${verifyUrl}"`);
+    } else if (process.platform === 'win32') {
+      exec(`start "" "${verifyUrl}"`);
+    } else {
+      exec(`xdg-open "${verifyUrl}"`);
+    }
     console.log(`  ${c.dim}(Browser should open automatically)${c.reset}`);
   } catch {}
 
@@ -658,14 +686,9 @@ async function loginCommand() {
       if (res.ok && data.api_key) {
         // Success!
         saveCredentials({ api_key: data.api_key, agent_name: data.agent_name });
-        console.log(`  ${c.green}${icons.safe}  Logged in as ${c.bold}${data.agent_name}${c.reset}`);
+        console.log(`\r  ${c.green}${icons.safe}  Logged in as ${c.bold}${data.agent_name}${c.reset}                `);
         console.log(`  ${c.dim}Key saved to: ${USER_CRED_FILE}${c.reset}`);
-        console.log();
-        console.log(`  ${c.bold}Ready!${c.reset} You can now:`);
-        console.log(`  ${c.dim}•${c.reset} Audit packages:   ${c.cyan}agentaudit audit <repo-url>${c.reset}`);
-        console.log(`  ${c.dim}•${c.reset} Quick scan:        ${c.cyan}agentaudit scan <repo-url>${c.reset}`);
-        console.log(`  ${c.dim}•${c.reset} Check registry:    ${c.cyan}agentaudit check <name>${c.reset}`);
-        console.log();
+        setupReadyMessage();
         return;
       }
 
@@ -4734,13 +4757,8 @@ async function main() {
 
   banner();
 
-  if (command === 'setup') {
+  if (command === 'setup' || command === 'login') {
     await setupCommand();
-    return;
-  }
-
-  if (command === 'login') {
-    await loginCommand();
     return;
   }
 
