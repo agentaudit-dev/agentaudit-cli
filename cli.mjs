@@ -15,7 +15,8 @@
  *   activity              Your recent audits & findings
  *   search <query>        Search packages in registry
  *   model [name|reset]    Configure LLM provider + model
- *   setup                 Log in to agentaudit.dev (for report uploads)
+ *   login                 Sign in with GitHub (opens browser, auto-creates API key)
+ *   setup                 Manual login — paste an API key from agentaudit.dev
  *   status                Show current config + auth status
  *   profile               Your profile — rank, points, audit stats
  *   help [command]        Show help
@@ -577,6 +578,117 @@ async function setupCommand() {
   console.log(`  ${c.dim}•${c.reset} Check registry:    ${c.cyan}agentaudit check <name>${c.reset}`);
   console.log(`  ${c.dim}•${c.reset} Submit reports via MCP in Claude/Cursor/Windsurf`);
   console.log();
+}
+
+// ── Login via GitHub Device Flow ─────────────────────────
+
+async function loginCommand() {
+  console.log(`  ${c.bold}AgentAudit Login${c.reset}`);
+  console.log(`  ${c.dim}Sign in with GitHub to upload audit reports${c.reset}`);
+  console.log();
+
+  const existing = loadCredentials();
+  if (existing) {
+    console.log(`  ${icons.safe}  Already logged in as ${c.bold}${existing.agent_name}${c.reset}`);
+    console.log(`  ${c.dim}Key: ${existing.api_key.slice(0, 12)}...${c.reset}`);
+    console.log();
+    const answer = await askQuestion(`  Re-authenticate? ${c.dim}(y/N)${c.reset} `);
+    if (answer.toLowerCase() !== 'y') {
+      console.log(`  ${c.dim}Keeping existing login.${c.reset}`);
+      return;
+    }
+    console.log();
+  }
+
+  // Step 1: Start device flow
+  process.stdout.write(`  Starting login flow...`);
+  let deviceData;
+  try {
+    const res = await fetch(`${REGISTRY_URL}/api/auth/device`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    deviceData = await res.json();
+    if (!res.ok || !deviceData.device_code) {
+      console.log(` ${c.red}failed${c.reset}`);
+      console.log(`  ${c.red}${deviceData.error || 'Could not start login flow'}${c.reset}`);
+      console.log(`  ${c.dim}Fallback: run ${c.cyan}agentaudit setup${c.dim} to paste an API key manually${c.reset}`);
+      return;
+    }
+    console.log(` ${c.green}ok${c.reset}`);
+  } catch (err) {
+    console.log(` ${c.red}failed${c.reset}`);
+    console.log(`  ${c.red}Could not reach ${REGISTRY_URL}${c.reset}`);
+    console.log(`  ${c.dim}Fallback: run ${c.cyan}agentaudit setup${c.dim} to paste an API key manually${c.reset}`);
+    return;
+  }
+
+  // Step 2: Open browser
+  const verifyUrl = deviceData.verification_url;
+  console.log();
+  console.log(`  ${c.bold}Open this URL in your browser:${c.reset}`);
+  console.log(`  ${c.cyan}${verifyUrl}${c.reset}`);
+  console.log();
+
+  // Try to auto-open browser
+  try {
+    const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    const { exec } = await import('child_process');
+    exec(`${openCmd} "${verifyUrl}"`);
+    console.log(`  ${c.dim}(Browser should open automatically)${c.reset}`);
+  } catch {}
+
+  // Step 3: Poll for authorization
+  console.log(`  ${c.dim}Waiting for GitHub authorization...${c.reset}`);
+  console.log();
+
+  const interval = (deviceData.interval || 5) * 1000;
+  const maxAttempts = Math.ceil((deviceData.expires_in || 900) / (interval / 1000));
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(r => setTimeout(r, interval));
+
+    try {
+      const res = await fetch(`${REGISTRY_URL}/api/auth/device?device_code=${deviceData.device_code}`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = await res.json();
+
+      if (res.ok && data.api_key) {
+        // Success!
+        saveCredentials({ api_key: data.api_key, agent_name: data.agent_name });
+        console.log(`  ${c.green}${icons.safe}  Logged in as ${c.bold}${data.agent_name}${c.reset}`);
+        console.log(`  ${c.dim}Key saved to: ${USER_CRED_FILE}${c.reset}`);
+        console.log();
+        console.log(`  ${c.bold}Ready!${c.reset} You can now:`);
+        console.log(`  ${c.dim}•${c.reset} Audit packages:   ${c.cyan}agentaudit audit <repo-url>${c.reset}`);
+        console.log(`  ${c.dim}•${c.reset} Quick scan:        ${c.cyan}agentaudit scan <repo-url>${c.reset}`);
+        console.log(`  ${c.dim}•${c.reset} Check registry:    ${c.cyan}agentaudit check <name>${c.reset}`);
+        console.log();
+        return;
+      }
+
+      if (data.error === 'authorization_pending') {
+        process.stdout.write(`\r  ${c.dim}Waiting... (${attempt + 1}/${maxAttempts})${c.reset}  `);
+        continue;
+      }
+
+      if (data.error === 'expired_token') {
+        console.log(`\n  ${c.red}Login expired. Run ${c.cyan}agentaudit login${c.red} again.${c.reset}`);
+        return;
+      }
+
+      // Unknown error
+      console.log(`\n  ${c.red}${data.error || 'Unknown error'}${c.reset}`);
+      return;
+    } catch {
+      // Network error during poll — continue trying
+      continue;
+    }
+  }
+
+  console.log(`\n  ${c.red}Login timed out. Run ${c.cyan}agentaudit login${c.red} again.${c.reset}`);
 }
 
 // ── Helpers ──────────────────────────────────────────────
@@ -3126,7 +3238,7 @@ async function auditRepo(url) {
       for (const { report } of reports) await uploadReport(report, creds);
       console.log(`  ${c.dim}Reports: ${REGISTRY_URL}/packages/${slug}${c.reset}`);
     } else if (!noUpload && !creds) {
-      console.log(`  ${c.dim}Run ${c.cyan}agentaudit setup${c.dim} to upload reports to agentaudit.dev${c.reset}`);
+      console.log(`  ${c.dim}Run ${c.cyan}agentaudit login${c.dim} to upload reports to agentaudit.dev${c.reset}`);
     }
 
     console.log();
@@ -3265,11 +3377,11 @@ async function auditRepo(url) {
         console.log(`  ${c.dim}Report: ${REGISTRY_URL}/packages/${slug}${c.reset}`);
       } else {
         console.log(` ${c.red}invalid key${c.reset}`);
-        console.log(`  ${c.dim}Run ${c.cyan}agentaudit setup${c.dim} to configure.${c.reset}`);
+        console.log(`  ${c.dim}Run ${c.cyan}agentaudit login${c.dim} to sign in.${c.reset}`);
       }
     }
   } else {
-    console.log(`  ${c.dim}Run ${c.cyan}agentaudit setup${c.dim} to configure your API key and upload reports${c.reset}`);
+    console.log(`  ${c.dim}Run ${c.cyan}agentaudit login${c.dim} to sign in and upload reports${c.reset}`);
   }
 
   console.log();
@@ -3370,7 +3482,7 @@ function renderOverviewTab(data, width) {
     profileLines.push(sevParts.join('  ') || `${c.dim}no findings yet${c.reset}`);
   } else {
     profileLines.push(`${c.dim}Not logged in${c.reset}`);
-    profileLines.push(`${c.dim}Run ${c.cyan}agentaudit setup${c.dim} to create account${c.reset}`);
+    profileLines.push(`${c.dim}Run ${c.cyan}agentaudit login${c.dim} to sign in${c.reset}`);
   }
 
   // Registry box
@@ -3591,7 +3703,7 @@ async function activityCommand(args) {
     } else {
       banner();
       console.log(`  ${c.yellow}Not logged in${c.reset}`);
-      console.log(`  ${c.dim}Run ${c.cyan}agentaudit setup${c.dim} to create an account${c.reset}`);
+      console.log(`  ${c.dim}Run ${c.cyan}agentaudit login${c.dim} to sign in${c.reset}`);
     }
     return;
   }
@@ -4467,7 +4579,8 @@ async function main() {
     console.log();
     console.log(`  ${c.bold}CONFIGURATION${c.reset}`);
     console.log(`    ${c.cyan}model${c.reset}                 Configure LLM provider + model`);
-    console.log(`    ${c.cyan}setup${c.reset}                 Log in to agentaudit.dev (for report uploads)`);
+    console.log(`    ${c.cyan}login${c.reset}                 Sign in with GitHub (opens browser)`);
+    console.log(`    ${c.cyan}setup${c.reset}                 Manual login — paste API key`);
     console.log(`    ${c.cyan}status${c.reset}                Show current config + auth status`);
     console.log(`    ${c.cyan}profile${c.reset}               Your profile — rank, points, audit stats`);
     console.log();
@@ -4623,6 +4736,11 @@ async function main() {
 
   if (command === 'setup') {
     await setupCommand();
+    return;
+  }
+
+  if (command === 'login') {
+    await loginCommand();
     return;
   }
 

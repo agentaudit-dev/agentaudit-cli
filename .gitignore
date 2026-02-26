@@ -2,4 +2,12 @@ node_modules/
 .env
 *.log
 .DS_Store
-
+config/
+.claude/
+.mcp.json
+agentaudit-web/
+agentaudit-mcp/
+agentaudit-skill/
+agentaudit-ops/
+agentaudit-github-action/
+agentaudit-benchmarks/
