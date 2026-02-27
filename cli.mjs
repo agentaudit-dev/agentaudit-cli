@@ -4864,13 +4864,23 @@ async function main() {
       `  agentaudit consensus fastmcp --json`,
     ],
     history: [
-      `${c.bold}agentaudit history${c.reset} [options]`,
+      `${c.bold}agentaudit history${c.reset} [show|upload] [n]`,
       ``,
       `Show your local audit history. Results are stored in ~/.config/agentaudit/history/`,
       `after every audit run. No internet connection required.`,
       ``,
+      `${c.bold}Subcommands:${c.reset}`,
+      `  history              List all local audits (numbered)`,
+      `  history show <n>     Show full report details for entry #n`,
+      `  history upload <n>   Retry upload of entry #n to agentaudit.dev`,
+      ``,
       `${c.bold}Options:${c.reset}`,
       `  --json          Machine-readable JSON output`,
+      ``,
+      `${c.bold}Examples:${c.reset}`,
+      `  agentaudit history`,
+      `  agentaudit history show 1`,
+      `  agentaudit history upload 1`,
     ],
     activity: [
       `${c.bold}agentaudit activity${c.reset} [options]`,
@@ -5033,13 +5043,96 @@ async function main() {
   }
   if (command === 'history') {
     banner();
+    const subCmd = targets[0];
     const entries = loadHistory(30);
-    if (entries.length === 0) {
+
+    if (entries.length === 0 && !subCmd) {
       console.log(`  ${c.dim}No local audit history yet. Run ${c.cyan}agentaudit audit <url>${c.dim} to start.${c.reset}`);
       console.log();
       return;
     }
 
+    // history show <n> — show full report details
+    if (subCmd === 'show') {
+      const idx = parseInt(targets[1], 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= entries.length) {
+        console.log(`  ${c.red}Invalid index.${c.reset} Use a number from 1 to ${entries.length}.`);
+        console.log(`  ${c.dim}Run ${c.cyan}agentaudit history${c.dim} to see the list.${c.reset}`);
+        return;
+      }
+      const entry = entries[idx];
+      if (jsonMode) {
+        console.log(JSON.stringify(entry, null, 2));
+        return;
+      }
+      console.log(sectionHeader(`Report: ${entry.skill_slug || 'unknown'}`));
+      console.log();
+      console.log(`  Source      ${c.bold}${entry.source_url || '?'}${c.reset}`);
+      console.log(`  Model       ${c.bold}${entry.audit_model || '?'}${c.reset}  ${c.dim}(${entry.audit_provider || '?'})${c.reset}`);
+      console.log(`  Risk        ${riskBadge(entry.risk_score ?? 0)}`);
+      console.log(`  Result      ${entry.result || '?'}`);
+      console.log(`  Files       ${entry.files_scanned || '?'}  ${c.dim}Duration: ${entry.audit_duration_ms ? (entry.audit_duration_ms / 1000).toFixed(1) + 's' : '?'}${c.reset}`);
+      console.log(`  Tokens      ${c.dim}in: ${entry.input_tokens || '?'}  out: ${entry.output_tokens || '?'}${c.reset}`);
+      console.log(`  File        ${c.dim}${entry._file}${c.reset}`);
+      console.log();
+      if (entry.findings && entry.findings.length > 0) {
+        console.log(sectionHeader(`Findings (${entry.findings.length})`));
+        console.log();
+        for (const f of entry.findings) {
+          const sc = severityColor(f.severity);
+          console.log(`  ${sc}┃${c.reset} ${sc}${(f.severity || '').toUpperCase().padEnd(8)}${c.reset}  ${c.bold}${f.title}${c.reset}`);
+          if (f.file) console.log(`  ${sc}┃${c.reset}           ${c.dim}${f.file}${f.line ? ':' + f.line : ''}${c.reset}`);
+          if (f.description) console.log(`  ${sc}┃${c.reset}           ${c.dim}${f.description.slice(0, 200)}${c.reset}`);
+          console.log();
+        }
+      } else {
+        console.log(`  ${c.green}No findings.${c.reset}`);
+        console.log();
+      }
+      return;
+    }
+
+    // history upload <n> — retry upload of a local report
+    if (subCmd === 'upload') {
+      const idx = parseInt(targets[1], 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= entries.length) {
+        console.log(`  ${c.red}Invalid index.${c.reset} Use a number from 1 to ${entries.length}.`);
+        console.log(`  ${c.dim}Run ${c.cyan}agentaudit history${c.dim} to see the list.${c.reset}`);
+        return;
+      }
+      const entry = entries[idx];
+      const creds = loadCredentials();
+      if (!creds) {
+        console.log(`  ${c.red}Not logged in.${c.reset} Run ${c.cyan}agentaudit login${c.reset} first.`);
+        return;
+      }
+      process.stdout.write(`  Uploading ${c.bold}${entry.skill_slug}${c.reset} (${entry.audit_model || '?'})...`);
+      try {
+        const reportCopy = { ...entry };
+        delete reportCopy._file;
+        const res = await fetch(`${REGISTRY_URL}/api/reports`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${creds.api_key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(reportCopy),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          console.log(` ${c.green}done${c.reset} ${c.dim}(report #${data.report_id})${c.reset}`);
+          console.log(`  ${c.dim}${REGISTRY_URL}/packages/${entry.skill_slug}${c.reset}`);
+        } else {
+          const errBody = await res.text().catch(() => '');
+          console.log(` ${c.red}failed (HTTP ${res.status})${c.reset}`);
+          if (errBody) console.log(`  ${c.dim}${errBody.slice(0, 300)}${c.reset}`);
+        }
+      } catch (e) {
+        console.log(` ${c.red}failed: ${e.message}${c.reset}`);
+      }
+      console.log();
+      return;
+    }
+
+    // Default: list all entries
     if (jsonMode) {
       console.log(JSON.stringify(entries, null, 2));
       return;
@@ -5048,7 +5141,8 @@ async function main() {
     console.log(sectionHeader(`Local History (${entries.length})`));
     console.log();
 
-    for (const entry of entries) {
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
       const slug = entry.skill_slug || 'unknown';
       const risk = entry.risk_score ?? '?';
       const sev = entry.max_severity || 'none';
@@ -5056,10 +5150,13 @@ async function main() {
       const model = entry.audit_model || '?';
       const fc = entry.findings?.length || 0;
       const ts = entry._file?.slice(0, 10) || '';
-      console.log(`  ${sc}┃${c.reset} ${c.bold}${slug.padEnd(30)}${c.reset} ${riskBadge(risk)}  ${c.dim}${model}${c.reset}`);
-      console.log(`  ${sc}┃${c.reset} ${c.dim}${ts}  ${fc} findings  ${sev.toUpperCase()}${c.reset}`);
+      const num = `${c.dim}${String(i + 1).padStart(2)}.${c.reset}`;
+      console.log(`  ${num} ${sc}┃${c.reset} ${c.bold}${slug.padEnd(30)}${c.reset} ${riskBadge(risk)}  ${c.dim}${model}${c.reset}`);
+      console.log(`     ${sc}┃${c.reset} ${c.dim}${ts}  ${fc} findings  ${sev.toUpperCase()}${c.reset}`);
       console.log();
     }
+    console.log(`  ${c.dim}Tip: ${c.cyan}agentaudit history show <n>${c.dim} for details, ${c.cyan}history upload <n>${c.dim} to retry upload${c.reset}`);
+    console.log();
     return;
   }
   if (command === 'activity' || command === 'my') {
