@@ -3396,15 +3396,52 @@ async function auditRepo(url) {
   }
 
   if (!activeLlm) {
+    // Check if user is logged in — offer remote scan as fallback
+    const _creds = loadCredentials();
+    if (_creds && process.stdin.isTTY && !process.argv.includes('--export')) {
+      console.log();
+      console.log(`  ${c.yellow}No LLM API key configured.${c.reset}`);
+      console.log();
+      // Fetch quota for display
+      let quotaLabel = '3/day free';
+      try {
+        const qr = await fetch(`${REGISTRY_URL}/api/scan`, {
+          headers: { 'Authorization': `Bearer ${_creds.api_key}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (qr.ok) {
+          const q = await qr.json();
+          quotaLabel = `${q.remaining}/${q.limit} free remaining`;
+        }
+      } catch {}
+      console.log(`  ${c.cyan}1${c.reset}  Use agentaudit.dev ${c.dim}(${quotaLabel})${c.reset}`);
+      console.log(`  ${c.cyan}2${c.reset}  Configure local LLM ${c.dim}(agentaudit model)${c.reset}`);
+      console.log();
+      const _choice = await askQuestion(`  Choice ${c.dim}(1/2, default: 1):${c.reset} `);
+      console.log();
+      if (_choice.trim() === '2') {
+        console.log(`  ${c.dim}Run ${c.cyan}agentaudit model${c.dim} to configure your LLM provider and API key.${c.reset}`);
+        console.log();
+        return null;
+      }
+      // Default: remote audit
+      return await remoteAudit(url);
+    }
+
+    // Not logged in or non-interactive
     console.log();
-    console.log(`  ${c.yellow}No LLM API key found.${c.reset} The ${c.bold}audit${c.reset} command needs an LLM to analyze code.`);
-    console.log();
-    console.log(`  ${c.bold}Set an API key${c.reset} (e.g. ${c.cyan}export OPENROUTER_API_KEY=sk-or-...${c.reset})`);
-    console.log(`  ${c.dim}Run "agentaudit model" to configure provider + model interactively${c.reset}`);
-    console.log();
-    console.log(`  ${c.bold}Or export for manual review:${c.reset} ${c.cyan}agentaudit audit ${url} --export${c.reset}`);
-    console.log(`  ${c.bold}Or use as MCP server${c.reset} in Cursor/Claude ${c.dim}(no extra API key needed)${c.reset}`);
-    console.log(`  ${c.dim}{ "agentaudit": { "command": "npx", "args": ["-y", "agentaudit"] } }${c.reset}`);
+    if (!_creds) {
+      console.log(`  ${c.yellow}No LLM API key found.${c.reset} To run a deep audit, you need either:`);
+      console.log();
+      console.log(`  ${c.bold}1.${c.reset} An LLM API key:  ${c.cyan}agentaudit model${c.reset}`);
+      console.log(`  ${c.bold}2.${c.reset} A free account:   ${c.cyan}agentaudit login${c.reset}  ${c.dim}(3 free remote scans/day)${c.reset}`);
+    } else {
+      console.log(`  ${c.yellow}No LLM API key found.${c.reset} The ${c.bold}audit${c.reset} command needs an LLM to analyze code.`);
+      console.log();
+      console.log(`  ${c.bold}Set an API key${c.reset} (e.g. ${c.cyan}export OPENROUTER_API_KEY=sk-or-...${c.reset})`);
+      console.log(`  ${c.dim}Run "agentaudit model" to configure provider + model interactively${c.reset}`);
+      console.log(`  ${c.dim}Or use ${c.cyan}agentaudit audit ${url} --remote${c.dim} for a free server-side scan${c.reset}`);
+    }
     console.log();
     if (process.argv.includes('--export')) {
       const exportPath = path.join(process.cwd(), `audit-${slug}.md`);
@@ -3527,6 +3564,210 @@ async function auditRepo(url) {
     console.log = _origConsoleLog;
     process.stdout.write = _origStdoutWrite;
   }
+}
+
+// ── Remote Audit (server-side free scan via SSE) ────────
+
+async function remoteAudit(url) {
+  // 1. Check credentials
+  const creds = loadCredentials();
+  if (!creds) {
+    console.log();
+    console.log(`  ${c.red}Not logged in.${c.reset} Remote scans require an agentaudit.dev account.`);
+    console.log(`  ${c.dim}Run ${c.cyan}agentaudit login${c.dim} to sign in (free).${c.reset}`);
+    console.log();
+    return null;
+  }
+
+  const authHeaders = { 'Authorization': `Bearer ${creds.api_key}`, 'Content-Type': 'application/json' };
+
+  // 2. Check quota
+  if (!quietMode) {
+    try {
+      const quotaRes = await fetch(`${REGISTRY_URL}/api/scan`, {
+        headers: authHeaders,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (quotaRes.ok) {
+        const quota = await quotaRes.json();
+        if (quota.remaining <= 0) {
+          console.log();
+          console.log(`  ${c.red}Rate limit reached${c.reset} — 0 of ${quota.limit} free remote scans remaining.`);
+          console.log(`  ${c.dim}Configure a local LLM for unlimited scans: ${c.cyan}agentaudit model${c.reset}`);
+          console.log();
+          return null;
+        }
+        console.log(`  ${c.dim}Remote scans: ${quota.remaining} of ${quota.limit} remaining today${c.reset}`);
+      }
+    } catch {
+      // Quota check failed — continue, the POST will catch it
+    }
+  }
+
+  // 3. Start SSE stream
+  if (!quietMode) {
+    console.log();
+    console.log(sectionHeader('Remote Audit'));
+    console.log(`  ${c.dim}Server: ${REGISTRY_URL}  •  Model: Gemini 2.5 Flash${c.reset}`);
+    console.log();
+  }
+
+  const startTime = Date.now();
+  let report = null;
+
+  try {
+    const res = await fetch(`${REGISTRY_URL}/api/scan`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(90_000),
+    });
+
+    if (!res.ok) {
+      let errBody;
+      try { errBody = await res.json(); } catch { errBody = { error: `HTTP ${res.status}` }; }
+      console.log(`  ${c.red}${errBody.message || errBody.error || `Server error (${res.status})`}${c.reset}`);
+      console.log();
+      return null;
+    }
+
+    // 4. Parse SSE stream
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const findings = [];
+    let currentStep = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop(); // keep incomplete chunk
+
+      for (const part of parts) {
+        const eventMatch = part.match(/^event:\s*(.+)/m);
+        const dataMatch = part.match(/^data:\s*(.+)/m);
+        if (!eventMatch || !dataMatch) continue;
+
+        const event = eventMatch[1].trim();
+        let data;
+        try { data = JSON.parse(dataMatch[1]); } catch { continue; }
+
+        switch (event) {
+          case 'step': {
+            if (quietMode) break;
+            const icon = data.status === 'done' ? `${c.green}✔${c.reset}` : `${c.cyan}◌${c.reset}`;
+            const detail = data.detail ? ` ${c.dim}(${data.detail})${c.reset}` : '';
+            // Clear previous line if updating same step
+            if (currentStep && data.status === 'done') {
+              process.stdout.write(`\r\x1b[K`);
+            }
+            if (data.status === 'done') {
+              console.log(`  ${icon} ${data.label}${detail}`);
+              currentStep = '';
+            } else {
+              process.stdout.write(`\r  ${icon} ${data.label}${detail}`);
+              currentStep = data.label;
+            }
+            break;
+          }
+
+          case 'finding': {
+            findings.push(data);
+            break;
+          }
+
+          case 'cached': {
+            if (!quietMode) {
+              console.log(`  ${c.cyan}ℹ${c.reset} Using cached result from ${c.bold}${data.scanned_ago}${c.reset}`);
+            }
+            break;
+          }
+
+          case 'result': {
+            report = {
+              cached: data.cached,
+              result: data.result,
+              risk_score: data.risk_score,
+              trust_score: data.trust_score,
+              findings_count: data.findings_count,
+              max_severity: data.max_severity,
+              slug: data.slug,
+              url: data.url,
+              findings: findings,
+              audit_model: 'google/gemini-2.5-flash',
+              audit_provider: 'agentaudit.dev',
+              source_url: url,
+              skill_slug: data.slug,
+              audit_duration_ms: Date.now() - startTime,
+            };
+            break;
+          }
+
+          case 'error': {
+            if (currentStep) {
+              process.stdout.write(`\r\x1b[K`);
+              currentStep = '';
+            }
+            console.log(`  ${c.red}${data.message || 'Server error'}${c.reset}`);
+            break;
+          }
+
+          case 'done':
+            break;
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      console.log(`  ${c.red}Timeout — server took too long to respond.${c.reset}`);
+    } else {
+      console.log(`  ${c.red}Connection error: ${err.message}${c.reset}`);
+    }
+    console.log();
+    return null;
+  }
+
+  if (!report) {
+    console.log(`  ${c.red}No result received from server.${c.reset}`);
+    console.log();
+    return null;
+  }
+
+  // 5. Display results
+  if (!quietMode) {
+    console.log();
+    console.log(sectionHeader('Result'));
+    console.log(`  ${riskBadge(report.risk_score || 0)}`);
+    console.log();
+
+    if (findings.length > 0) {
+      console.log(sectionHeader(`Findings (${findings.length})`));
+      console.log();
+      for (const f of findings) {
+        const sc = severityColor(f.severity);
+        console.log(`  ${sc}┃${c.reset} ${sc}${(f.severity || '').toUpperCase().padEnd(8)}${c.reset}  ${c.bold}${f.title}${c.reset}`);
+        if (f.file) console.log(`  ${sc}┃${c.reset}           ${c.dim}${f.file}${f.line ? ':' + f.line : ''}${c.reset}`);
+        console.log();
+      }
+    } else {
+      console.log(`  ${c.green}No findings — package looks clean.${c.reset}`);
+      console.log();
+    }
+
+    console.log(`  ${c.dim}Report: ${REGISTRY_URL}/packages/${report.slug}${c.reset}`);
+    console.log(`  ${c.dim}Duration: ${elapsed(startTime)}${c.reset}`);
+    console.log();
+  }
+
+  // JSON output
+  if (jsonMode && !quietMode) {
+    console.log(JSON.stringify(report, null, 2));
+  }
+
+  return report;
 }
 
 // ── Check command ───────────────────────────────────────
@@ -4406,7 +4647,7 @@ async function main() {
   // --no-color already handled at top level for `c` object
 
   // Strip global flags from args (including --model <value>, --format <value>)
-  const globalFlags = new Set(['--json', '--quiet', '-q', '--no-color', '--no-upload']);
+  const globalFlags = new Set(['--json', '--quiet', '-q', '--no-color', '--no-upload', '--remote']);
   let args = rawArgs.filter(a => !globalFlags.has(a));
   // Remove --model <value> and --models <value> pairs
   const modelIdx = args.indexOf('--model');
@@ -4426,7 +4667,10 @@ async function main() {
   }
   // SARIF mode: suppress console output so only clean JSON goes to stdout
   if (outputFormat === 'sarif') { quietMode = true; jsonMode = true; }
-  
+
+  // --remote: use server-side scan instead of local LLM
+  const remoteFlag = rawArgs.includes('--remote');
+
   // Detect per-command --help BEFORE stripping (e.g. `agentaudit model --help`)
   const wantsHelp = args.includes('--help') || args.includes('-h');
   // Strip --help/-h from args for routing
@@ -4463,20 +4707,23 @@ async function main() {
       ``,
       `${c.bold}Options:${c.reset}`,
       `  --deep             Run deep LLM audit instead (same as \`agentaudit audit\`)`,
+      `  --remote           Use agentaudit.dev server for --deep (no LLM key needed)`,
       `  --format sarif      Output results as SARIF 2.1.0 (for GitHub Code Scanning)`,
       ``,
       `${c.bold}Examples:${c.reset}`,
       `  agentaudit scan https://github.com/owner/repo`,
       `  agentaudit scan https://github.com/a/b https://github.com/c/d`,
       `  agentaudit scan https://github.com/owner/repo --deep`,
+      `  agentaudit scan https://github.com/owner/repo --deep --remote`,
       `  agentaudit scan https://github.com/owner/repo --format sarif > results.sarif`,
     ],
     audit: [
       `${c.bold}agentaudit audit${c.reset} <url> [url...] [options]`,
       ``,
-      `Deep LLM-powered 3-pass security audit (~30s). Requires an LLM API key.`,
+      `Deep LLM-powered 3-pass security audit (~30s).`,
       ``,
       `${c.bold}Options:${c.reset}`,
+      `  --remote           Use agentaudit.dev server (no LLM key needed, 3/day free)`,
       `  --model <name>     Override LLM model for this run`,
       `  --models <a,b,c>   Multi-model audit (parallel calls, consensus comparison)`,
       `  --no-upload        Skip uploading report to registry`,
@@ -4486,6 +4733,7 @@ async function main() {
       ``,
       `${c.bold}Examples:${c.reset}`,
       `  agentaudit audit https://github.com/owner/repo`,
+      `  agentaudit audit https://github.com/owner/repo --remote`,
       `  agentaudit audit https://github.com/owner/repo --model gpt-4o`,
       `  agentaudit audit https://github.com/owner/repo --models gemini-2.5-flash,claude-sonnet-4-20250514`,
       `  agentaudit audit https://github.com/owner/repo --format sarif > results.sarif`,
@@ -4930,6 +5178,20 @@ async function main() {
     if (creds) {
       console.log(`  Account     ${c.bold}${creds.agent_name}${c.reset}  ${c.green}✔ logged in${c.reset}`);
       console.log(`  ${c.dim}            Key: ${creds.api_key.slice(0, 12)}...${c.reset}`);
+      // Remote scan quota
+      try {
+        const quotaRes = await fetch(`${REGISTRY_URL}/api/scan`, {
+          headers: { 'Authorization': `Bearer ${creds.api_key}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (quotaRes.ok) {
+          const quota = await quotaRes.json();
+          const resetLabel = quota.resets_in_ms
+            ? ` ${c.dim}(resets in ${Math.ceil(quota.resets_in_ms / 3600000)}h)${c.reset}`
+            : '';
+          console.log(`  Remote      ${c.bold}${quota.remaining}${c.reset} of ${quota.limit} free scans remaining${resetLabel}`);
+        }
+      } catch {}
     } else {
       console.log(`  Account     ${c.yellow}not configured${c.reset}  ${c.dim}— run ${c.cyan}agentaudit setup${c.dim} to create one${c.reset}`);
     }
@@ -5414,12 +5676,13 @@ async function main() {
       return;
     }
     
-    // --deep redirects to audit flow
+    // --deep redirects to audit flow (--remote supported)
     if (deepFlag) {
+      const auditFn = remoteFlag ? remoteAudit : auditRepo;
       let hasFindings = false;
       const allReports = [];
       for (const url of urls) {
-        const report = await auditRepo(url);
+        const report = await auditFn(url);
         if (Array.isArray(report)) {
           allReports.push(...report.filter(Boolean));
           if (report.some(r => r?.findings?.length > 0)) hasFindings = true;
@@ -5480,6 +5743,24 @@ async function main() {
       console.log(`  ${c.dim}Usage: ${c.cyan}agentaudit audit <url>${c.dim} — e.g. agentaudit audit https://github.com/owner/repo${c.reset}`);
       console.log(`  ${c.dim}Tip: use ${c.cyan}agentaudit discover --deep${c.dim} to find & audit locally installed MCP servers${c.reset}`);
       process.exitCode = 2;
+      return;
+    }
+
+    // --remote: use server-side scan
+    if (remoteFlag) {
+      let hasFindings = false;
+      const allReports = [];
+      for (const url of urls) {
+        const result = await remoteAudit(url);
+        if (result) {
+          allReports.push(result);
+          if (result.findings?.length > 0) hasFindings = true;
+        }
+      }
+      if (outputFormat === 'sarif') {
+        console.log(JSON.stringify(toSarif(allReports), null, 2));
+      }
+      process.exitCode = hasFindings ? 1 : 0;
       return;
     }
 
