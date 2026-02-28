@@ -1,6 +1,6 @@
 {
   "name": "agentaudit",
-  "version": "3.12.12",
+  "version": "3.13.0",
   "description": "Security scanner for AI agent packages — CLI + MCP server",
   "type": "module",
   "bin": {
@@ -14,6 +14,7 @@
     "tool-poisoning-detector.mjs",
     "scan-tool-poisoning.mjs",
     "prompts/audit-prompt.md",
+    "prompts/verification-prompt.md",
     "LICENSE",
     "README.md"
   ],

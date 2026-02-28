@@ -2767,6 +2767,16 @@ function loadAuditPrompt() {
   return null;
 }
 
+function loadVerificationPrompt() {
+  const promptPath = path.join(SKILL_DIR, 'prompts', 'verification-prompt.md');
+  if (fs.existsSync(promptPath)) return fs.readFileSync(promptPath, 'utf8');
+  // Fallback: embedded minimal prompt
+  return `You are a security verification auditor. Your job is to CHALLENGE a finding from a security scan.
+Verify whether the cited code exists and the vulnerability is real. Respond with ONLY a JSON object:
+{"verification_status":"verified|demoted|rejected","original_severity":"...","verified_severity":"...","verified_confidence":"high|medium|low","code_exists":true|false,"code_matches_description":true|false,"is_opt_in":true|false,"is_core_functionality":true|false,"attack_scenario":"...","rejection_reason":"...","reasoning":"..."}
+Decision rules: code_exists=false→REJECTED; code_matches_description=false→REJECTED; is_opt_in=true AND severity critical/high→DEMOTED to low; no attack_scenario AND severity critical/high→DEMOTED to medium.`;
+}
+
 // Known context window sizes (input tokens) for common models
 const MODEL_CONTEXT_LIMITS = {
   'claude-sonnet-4': 200000, 'claude-opus-4': 200000, 'claude-haiku-4': 200000,
@@ -3177,6 +3187,181 @@ function toSarif(reports) {
   };
 }
 
+// ── Verification Pass (Pass 2) ──────────────────────────
+// Adversarial verification: re-examines each finding against actual source code
+
+function buildVerificationMessage(finding, context) {
+  return [
+    `## Finding to Verify`,
+    ``,
+    `**Title:** ${finding.title}`,
+    `**Severity:** ${finding.severity}`,
+    `**Confidence:** ${finding.confidence || 'medium'}`,
+    `**Pattern:** ${finding.pattern_id || 'unknown'} (${finding.cwe_id || 'N/A'})`,
+    `**File:** ${finding.file || 'unknown'}${finding.line ? ':' + finding.line : ''}`,
+    `**Description:** ${finding.description || ''}`,
+    `**Cited Code:**`,
+    '```',
+    finding.content || '(no code cited)',
+    '```',
+    ``,
+    `## Actual Source Code of ${finding.file || 'unknown'}`,
+    ``,
+    '```',
+    context.sourceFileContent,
+    '```',
+    ``,
+    `## Package File Listing (for context)`,
+    ``,
+    context.fileList,
+    ``,
+    `## Package Manifest`,
+    ``,
+    '```',
+    context.manifestContent,
+    '```',
+    ``,
+    `---`,
+    `Verify this finding. Does the cited code exist? Is the vulnerability real?`,
+    `Respond with ONLY the JSON verdict.`,
+  ].join('\n');
+}
+
+function downgradeSeverity(severity) {
+  const map = { critical: 'high', high: 'medium', medium: 'low', low: 'low', info: 'info' };
+  return map[(severity || '').toLowerCase()] || severity;
+}
+
+async function verifyFindings(findings, files, verifierConfig, options = {}) {
+  const { maxFindings = 10 } = options;
+
+  if (!findings || findings.length === 0) return { finalFindings: [], stats: { total: 0, verified: 0, demoted: 0, rejected: 0, unverified: 0, inputTokens: 0, outputTokens: 0 } };
+
+  const verificationPrompt = loadVerificationPrompt();
+  if (!verificationPrompt) return { finalFindings: findings, stats: { total: findings.length, verified: 0, demoted: 0, rejected: 0, unverified: findings.length, inputTokens: 0, outputTokens: 0 } };
+
+  // Sort by severity (critical first) and take top N
+  const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  const toVerify = [...findings]
+    .sort((a, b) => (severityOrder[a.severity] ?? 4) - (severityOrder[b.severity] ?? 4))
+    .slice(0, maxFindings);
+
+  const fileList = files.map(f => `${f.path} (${(f.content || '').length} bytes)`).join('\n');
+  const manifest = files.find(f =>
+    f.path === 'package.json' || f.path === 'pyproject.toml' ||
+    f.path === 'setup.py' || f.path === 'Cargo.toml'
+  );
+
+  const verified = [];
+  const demoted = [];
+  const rejected = [];
+
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  for (const finding of toVerify) {
+    // Find the actual source file
+    const sourceFile = files.find(f =>
+      f.path === finding.file || f.path.endsWith('/' + finding.file)
+    );
+
+    const userMsg = buildVerificationMessage(finding, {
+      sourceFileContent: sourceFile?.content || '(FILE NOT FOUND IN PACKAGE — this may indicate a fabricated file reference)',
+      fileList,
+      manifestContent: manifest?.content || '(no manifest found)',
+    });
+
+    try {
+      const result = await callLlm(verifierConfig, verificationPrompt, userMsg);
+
+      if (result.error) {
+        finding.verification_status = 'unverified';
+        finding.verification_reasoning = `Verification error: ${result.error}`;
+        continue;
+      }
+
+      const verdict = extractJSON(result.text);
+      totalInputTokens += result.inputTokens || 0;
+      totalOutputTokens += result.outputTokens || 0;
+
+      if (!verdict || !verdict.verification_status) {
+        finding.verification_status = 'unverified';
+        finding.verification_reasoning = 'Verification returned unparseable response';
+        continue;
+      }
+
+      // Apply verdict
+      finding.verification_model = verifierConfig.model;
+
+      switch (verdict.verification_status) {
+        case 'rejected':
+          finding.verification_status = 'rejected';
+          finding.verification_reasoning = verdict.rejection_reason || verdict.reasoning || 'Rejected by verification';
+          finding.code_exists = verdict.code_exists;
+          rejected.push(finding);
+          break;
+
+        case 'demoted':
+          finding.verification_status = 'demoted';
+          finding.original_severity = finding.severity;
+          finding.severity = verdict.verified_severity || downgradeSeverity(finding.severity);
+          finding.verified_confidence = verdict.verified_confidence || 'low';
+          finding.verification_reasoning = verdict.reasoning || '';
+          finding.is_opt_in = verdict.is_opt_in;
+          finding.code_exists = verdict.code_exists;
+          finding.by_design = verdict.is_opt_in || verdict.is_core_functionality || finding.by_design;
+          finding.score_impact = finding.by_design ? 0 : (SEVERITY_IMPACT[finding.severity] || -5);
+          demoted.push(finding);
+          break;
+
+        case 'verified':
+        default:
+          finding.verification_status = 'verified';
+          finding.verified_confidence = verdict.verified_confidence || finding.confidence;
+          finding.verification_reasoning = verdict.reasoning || '';
+          finding.code_exists = verdict.code_exists ?? true;
+          // Adjust severity if verifier disagrees
+          if (verdict.verified_severity && verdict.verified_severity !== finding.severity) {
+            finding.original_severity = finding.severity;
+            finding.severity = verdict.verified_severity;
+            finding.score_impact = finding.by_design ? 0 : (SEVERITY_IMPACT[finding.severity] || -5);
+          }
+          verified.push(finding);
+          break;
+      }
+    } catch (err) {
+      finding.verification_status = 'unverified';
+      finding.verification_reasoning = `Verification error: ${err.message || err}`;
+    }
+  }
+
+  // Findings not sent to verification remain as-is
+  const unverified = findings.filter(f => !toVerify.includes(f));
+  for (const f of unverified) {
+    if (!f.verification_status) f.verification_status = 'unverified';
+  }
+
+  // Final findings = verified + demoted + unverified (rejected are REMOVED)
+  const finalFindings = [...verified, ...demoted, ...unverified];
+
+  return {
+    verified,
+    demoted,
+    rejected,
+    unverified,
+    finalFindings,
+    stats: {
+      total: findings.length,
+      verified: verified.length,
+      demoted: demoted.length,
+      rejected: rejected.length,
+      unverified: unverified.length,
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
+    },
+  };
+}
+
 async function auditRepo(url) {
   // In quiet mode (SARIF/JSON), redirect all progress output to stderr
   // so stdout only contains clean machine-readable data
@@ -3583,6 +3768,91 @@ async function auditRepo(url) {
 
   enrichReport(report);
   enrichFindings(report, files, pkgInfo);
+
+  // ── Pass 2: Verification ──────────────────────────────
+  const verifyArg = process.argv.find(a => a === '--verify' || a.startsWith('--verify='));
+  const noVerify = process.argv.includes('--no-verify');
+
+  let verificationResult = null;
+  if (verifyArg && !noVerify && report.findings && report.findings.length > 0) {
+    // Resolve verifier model
+    let verifierConfig;
+    const verifyValue = verifyArg.includes('=') ? verifyArg.split('=')[1] : process.argv[process.argv.indexOf('--verify') + 1];
+
+    if (verifyValue === 'cross') {
+      // Cross-model: pick a different model than the scanner
+      const crossModels = ['sonnet', 'haiku', 'gemini', 'gpt-4o'];
+      const scannerName = (activeLlm.name || '').toLowerCase();
+      const crossModel = crossModels.find(m => !scannerName.includes(m)) || crossModels[0];
+      verifierConfig = resolveModel(crossModel);
+    } else if (verifyValue === 'self' || verifyValue === '--' || !verifyValue || verifyValue.startsWith('-')) {
+      // Self-verification: same model
+      verifierConfig = activeLlm;
+    } else {
+      // Specific model name
+      verifierConfig = resolveModel(verifyValue);
+    }
+
+    if (!verifierConfig) {
+      console.log(`  ${c.yellow}⚠ Verification skipped: no API key for verifier model${c.reset}`);
+    } else {
+      const verifyMode = verifierConfig === activeLlm ? 'self' : 'cross';
+      const verifyLabel = `${verifierConfig.name} → ${verifierConfig.model}`;
+      console.log();
+      process.stdout.write(`  ${stepProgress(5, 5)} Verifying findings ${c.dim}(${verifyMode}, ${verifyLabel})${c.reset}...`);
+
+      const vStart = Date.now();
+      verificationResult = await verifyFindings(report.findings, files, verifierConfig, { maxFindings: 10 });
+      const vDuration = Math.round((Date.now() - vStart) / 1000);
+
+      console.log(` ${c.green}done${c.reset} ${c.dim}(${vDuration}s)${c.reset}`);
+
+      // Show per-finding verification results
+      for (const f of verificationResult.rejected) {
+        console.log(`    ${c.red}✗${c.reset} ${(f.title || '').slice(0, 50).padEnd(52)} ${c.red}rejected${c.reset} ${c.dim}(${f.verification_reasoning?.slice(0, 60) || ''})${c.reset}`);
+      }
+      for (const f of verificationResult.demoted) {
+        console.log(`    ${c.yellow}↓${c.reset} ${(f.title || '').slice(0, 50).padEnd(52)} ${c.yellow}demoted${c.reset} ${c.dim}(${f.original_severity} → ${f.severity})${c.reset}`);
+      }
+      for (const f of verificationResult.verified) {
+        console.log(`    ${c.green}✓${c.reset} ${(f.title || '').slice(0, 50).padEnd(52)} ${c.green}verified${c.reset} ${c.dim}(${f.verified_confidence || f.confidence || 'medium'})${c.reset}`);
+      }
+
+      console.log(`    ${c.dim}${verificationResult.stats.verified} verified, ${verificationResult.stats.demoted} demoted, ${verificationResult.stats.rejected} rejected${c.reset}`);
+
+      // Apply: replace findings with verified set (rejected are removed)
+      const findingsBeforeVerification = report.findings.length;
+      report.findings = verificationResult.finalFindings;
+      report.findings_count = report.findings.length;
+
+      // Recalculate risk score after verification
+      const recalcRisk = report.findings.reduce((sum, f) => {
+        if (f.by_design) return sum;
+        return sum + Math.abs(f.score_impact || SEVERITY_IMPACT[f.severity] || -5);
+      }, 0);
+      report.risk_score = Math.min(100, recalcRisk);
+      report.max_severity = report.findings.length > 0
+        ? report.findings.reduce((max, f) => {
+            const order = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+            return (order[f.severity] || 0) > (order[max] || 0) ? f.severity : max;
+          }, 'info')
+        : 'none';
+      if (report.risk_score <= 25) report.result = 'safe';
+      else if (report.risk_score <= 50) report.result = 'caution';
+      else report.result = 'unsafe';
+
+      // Add verification metadata to report
+      report.verification_pass = true;
+      report.verification_model = verifierConfig.model;
+      report.verification_mode = verifyMode;
+      report.verification_duration_ms = Date.now() - vStart;
+      report.findings_before_verification = findingsBeforeVerification;
+      report.findings_rejected = verificationResult.stats.rejected;
+      report.findings_demoted = verificationResult.stats.demoted;
+      report.findings_verified = verificationResult.stats.verified;
+    }
+  }
+
   saveHistory(report);
 
   // Display results
@@ -3592,11 +3862,15 @@ async function auditRepo(url) {
   console.log();
 
   if (report.findings && report.findings.length > 0) {
-    console.log(sectionHeader(`Findings (${report.findings.length})`));
+    const rejectedNote = verificationResult ? ` ${c.dim}[${verificationResult.stats.rejected} rejected by verification]${c.reset}` : '';
+    console.log(sectionHeader(`Findings (${report.findings.length})`) + rejectedNote);
     console.log();
     for (const f of report.findings) {
       const sc = severityColor(f.severity);
-      console.log(`  ${sc}┃${c.reset} ${sc}${(f.severity || '').toUpperCase().padEnd(8)}${c.reset}  ${c.bold}${f.title}${c.reset}`);
+      let badge = '';
+      if (f.verification_status === 'verified') badge = ` ${c.green}✓${c.reset}`;
+      else if (f.verification_status === 'demoted') badge = ` ${c.yellow}↓${c.reset}${c.dim}was ${f.original_severity}${c.reset}`;
+      console.log(`  ${sc}┃${c.reset} ${sc}${(f.severity || '').toUpperCase().padEnd(8)}${c.reset}  ${c.bold}${f.title}${c.reset}${badge}`);
       if (f.file) console.log(`  ${sc}┃${c.reset}           ${c.dim}${f.file}${f.line ? ':' + f.line : ''}${c.reset}`);
       if (f.description) console.log(`  ${sc}┃${c.reset}           ${c.dim}${f.description.slice(0, 120)}${c.reset}`);
       console.log();
@@ -4815,9 +5089,14 @@ async function main() {
     audit: [
       `${c.bold}agentaudit audit${c.reset} <url> [url...] [options]`,
       ``,
-      `Deep LLM-powered 3-pass security audit (~30s).`,
+      `Deep LLM-powered security audit with optional verification pass.`,
       ``,
       `${c.bold}Options:${c.reset}`,
+      `  --verify [mode]    Enable Pass 2 verification (reduces false positives)`,
+      `                       self   — same model verifies its own findings (default)`,
+      `                       cross  — different model verifies (higher quality)`,
+      `                       <name> — specific model as verifier (e.g. sonnet)`,
+      `  --no-verify        Disable verification (even if default)`,
       `  --remote           Use agentaudit.dev server (no LLM key needed, 3/day free)`,
       `  --model <name>     Override LLM model for this run`,
       `  --models <a,b,c>   Multi-model audit (parallel calls, consensus comparison)`,
@@ -4828,6 +5107,8 @@ async function main() {
       ``,
       `${c.bold}Examples:${c.reset}`,
       `  agentaudit audit https://github.com/owner/repo`,
+      `  agentaudit audit https://github.com/owner/repo --verify`,
+      `  agentaudit audit https://github.com/owner/repo --verify cross`,
       `  agentaudit audit https://github.com/owner/repo --remote`,
       `  agentaudit audit https://github.com/owner/repo --model gpt-4o`,
       `  agentaudit audit https://github.com/owner/repo --models gemini-2.5-flash,claude-sonnet-4-20250514`,
@@ -5099,6 +5380,7 @@ async function main() {
     console.log(`    ${c.dim}--json             Machine-readable JSON output${c.reset}`);
     console.log(`    ${c.dim}--quiet            Suppress banner${c.reset}`);
     console.log(`    ${c.dim}--no-color         Disable ANSI colors (also: NO_COLOR env)${c.reset}`);
+    console.log(`    ${c.dim}--verify [mode]    Verify findings (reduces false positives)${c.reset}`);
     console.log(`    ${c.dim}--model <name>     Override LLM model for this run${c.reset}`);
     console.log(`    ${c.dim}--models <a,b,c>   Multi-model audit (parallel, with consensus)${c.reset}`);
     console.log(`    ${c.dim}--no-upload        Skip uploading report to registry${c.reset}`);
