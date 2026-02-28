@@ -77,18 +77,18 @@ agentaudit lookup fastmcp
 
 **Example output:**
 ```
-  ⛨ AgentAudit v3.12.9  │  my-scanner #3 · 280pts · 19 audits
+  ◆ AgentAudit v3.13.4  │  my-scanner · #3 · 280pts · 19 audits
 
   Discovering MCP servers in your AI editors...
 
 •  Scanning Cursor  ~/.cursor/mcp.json    found 3 servers
 
 ├──  tool   supabase-mcp              ✔ ok
-│   SAFE  Risk 0  https://agentaudit.dev/skills/supabase-mcp
+│   SAFE  Risk 0  https://agentaudit.dev/packages/supabase-mcp
 ├──  tool   browser-tools-mcp         ✔ ok
 │   ⚠ not audited  Run: agentaudit audit https://github.com/nichochar/browser-tools-mcp
 └──  tool   filesystem                ✔ ok
-│   SAFE  Risk 0  https://agentaudit.dev/skills/filesystem
+│   SAFE  Risk 0  https://agentaudit.dev/packages/filesystem
 
   Looking for general package scanning? Try `pip audit` or `npm audit`.
 ```
@@ -210,7 +210,11 @@ Then ask your agent: *"Check which MCP servers I have installed and audit any un
 | `agentaudit scan <url>` | Quick regex-based static scan (~2s) | `agentaudit scan https://github.com/owner/repo` |
 | `agentaudit scan <url> --deep` | Deep audit (same as `audit`) | `agentaudit scan https://github.com/owner/repo --deep` |
 | `agentaudit audit <url>` | Deep LLM-powered 3-pass audit (~30s) | `agentaudit audit https://github.com/owner/repo` |
+| `agentaudit audit <url> --verify` | Audit + adversarial verification pass (reduces false positives) | `agentaudit audit <url> --verify self` |
+| `agentaudit audit <url> --remote` | Server-side scan via agentaudit.dev (no LLM key needed, 3/day free) | `agentaudit audit <url> --remote` |
+| `agentaudit consensus <name>` | Cross-model consensus view for a package | `agentaudit consensus supabase-mcp` |
 | `agentaudit lookup <name>` | Look up package in trust registry | `agentaudit lookup fastmcp` |
+| `agentaudit history` | Show local audit history | `agentaudit history` |
 
 ### Community
 
@@ -238,6 +242,10 @@ Then ask your agent: *"Check which MCP servers I have installed and audit any un
 | `--quiet` / `-q` | Suppress banner and decorative output |
 | `--no-color` | Disable ANSI colors (also respects `NO_COLOR` env var) |
 | `--model <name>` | Override LLM model for this run |
+| `--models <a,b,c>` | Multi-model audit (parallel calls, consensus comparison) |
+| `--verify <mode>` | Adversarial verification: `self` (same model), `cross` (different model), or `<model-name>` |
+| `--no-verify` | Skip verification even if configured |
+| `--remote` | Use agentaudit.dev server for scan (no local LLM key needed) |
 | `--no-upload` | Skip uploading report to registry |
 | `--export` | Export audit payload as markdown |
 | `--debug` | Show raw LLM response on parse errors |
@@ -279,6 +287,9 @@ When running as an MCP server, AgentAudit exposes the following tools to your AI
 | `check_registry` | Look up a package in the trust registry |
 | `submit_report` | Upload audit findings to the registry |
 | `discover_servers` | Find MCP servers in local editor configs |
+| `consensus_analysis` | Cross-model consensus view for a package |
+| `search_packages` | Search packages in the registry by name, ASF-ID, or hash |
+| `scan_tool_poisoning` | Detect tool poisoning in MCP tool descriptions |
 
 ### Workflow
 
@@ -383,6 +394,34 @@ The deep audit (`agentaudit audit`) uses a structured 3-phase LLM analysis — n
 
 This architecture achieved **0% false positives** on our 11-package test set, down from 42% in v2.
 
+### Adversarial Verification Pass (v3.13+)
+
+After the 3-pass audit, an optional **verification pass** re-examines each finding against the actual source code:
+
+```bash
+agentaudit audit https://github.com/owner/repo --verify self
+```
+
+Each finding goes through a 5-point checklist:
+1. **Code Existence** — Does the cited code actually exist in the file?
+2. **Context Accuracy** — Is the code used in the way described?
+3. **Execution Model** — Can an attacker actually trigger this?
+4. **Severity Calibration** — Is the severity appropriate?
+5. **Fabrication Check** — Are there hallucinated details?
+
+Verdicts: `verified` (confirmed real), `demoted` (severity reduced), `rejected` (false positive removed).
+
+### Model Accuracy (Real-World Data)
+
+We benchmarked multiple LLMs on the **Top 20 most popular MCP servers** (62+ reports):
+
+| Model | Findings on Top 20 | Precision | Assessment |
+|-------|-------------------|-----------|------------|
+| **Claude Opus 4.6** | 0 findings (all clean) | N/A | Very conservative — ideal for avoiding false positives |
+| **Gemini 2.5 Flash** | Many findings | ~30% strict | High false positive rate — not recommended for production audits |
+
+> **Key insight:** Model choice dramatically affects audit quality. We recommend Claude Opus 4 or Claude Sonnet 4 for production audits. Use `--models` to run multiple models and compare results via `consensus`.
+
 ---
 
 ## 🔄 CI/CD Integration
@@ -450,11 +489,12 @@ AgentAudit includes a full-screen interactive dashboard and standalone community
 agentaudit dashboard    # or: agentaudit dash
 ```
 
-5-tab TUI with keyboard navigation (←→ tabs, ↑↓ scroll, 1-5 jump, q quit):
+5-tab TUI with keyboard navigation (←→ tabs, ↑↓ scroll, 1-5 jump, q quit).
+Overview tab includes **interactive Quick Actions** — select and launch audits, consensus views, or remote scans directly from the dashboard:
 
 | Tab | Content |
 |-----|---------|
-| **[1] Overview** | Your profile (rank, points, audits, severity breakdown) + registry stats |
+| **[1] Overview** | Your profile + registry stats + interactive Quick Actions (press a/v/r/c or Enter) |
 | **[2] Leaderboard** | Top contributors with medal rankings and bar charts |
 | **[3] Benchmark** | LLM model audit performance comparison |
 | **[4] Activity** | Your recent audits and findings |
