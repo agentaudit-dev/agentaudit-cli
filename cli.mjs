@@ -2875,6 +2875,30 @@ async function safeJsonParse(res, llmConfig) {
   }
 }
 
+function getMaxOutputTokens(model) {
+  // Known max_completion_tokens from provider docs / OpenRouter API
+  const limits = {
+    // Anthropic
+    'claude-haiku-4-5': 8192, 'claude-3-haiku': 4096, 'claude-3-5-haiku': 8192,
+    'claude-sonnet-4-6': 64000, 'claude-sonnet-4-5': 16384, 'claude-3-5-sonnet': 8192,
+    'claude-opus-4-6': 32768, 'claude-opus-4': 32768,
+    // Google Gemini (all current models support 65536)
+    'gemini-3': 65536, 'gemini-2.5': 65536, 'gemini-2.0': 65536,
+    // Qwen
+    'qwen3.5': 65536, 'qwen3': 32768, 'qwen2.5': 32768,
+    // xAI
+    'grok-4': 32768, 'grok-3': 16384,
+    // OpenAI
+    'gpt-4.1': 32768, 'gpt-4o': 16384, 'gpt-4-turbo': 4096,
+    'o3': 100000, 'o4-mini': 100000,
+  };
+  const m = (model || '').toLowerCase();
+  for (const [key, val] of Object.entries(limits)) {
+    if (m.includes(key)) return val;
+  }
+  return 16384; // conservative fallback for unknown models
+}
+
 async function callLlm(llmConfig, systemPrompt, userMessage) {
   const apiKey = process.env[llmConfig.key];
   if (!apiKey) return { error: `Missing API key: ${llmConfig.key}` };
@@ -2896,7 +2920,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       const res = await fetch(llmConfig.url, {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: llmConfig.model, max_tokens: 32768, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
+        body: JSON.stringify({ model: llmConfig.model, max_tokens: getMaxOutputTokens(llmConfig.model), system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
       data = await safeJsonParse(res, llmConfig);
@@ -2928,7 +2952,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: 'user', parts: [{ text: userMessage }] }],
-          generationConfig: { maxOutputTokens: 65536, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 8192 } },
+          generationConfig: { maxOutputTokens: getMaxOutputTokens(llmConfig.model), responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 8192 } },
         }),
         signal: AbortSignal.timeout(180_000),
       });
@@ -2957,7 +2981,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       const res = await fetch(llmConfig.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: llmConfig.model, max_tokens: 32768, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
+        body: JSON.stringify({ model: llmConfig.model, max_tokens: getMaxOutputTokens(llmConfig.model), messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
       data = await safeJsonParse(res, llmConfig);
