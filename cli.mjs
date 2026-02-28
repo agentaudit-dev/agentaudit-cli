@@ -3688,12 +3688,17 @@ async function auditRepo(url) {
   if (modelNames.length === 1) {
     activeLlm = resolveModel(modelNames[0]);
   } else {
-    activeLlm = resolveProvider();
     // Model override: --model flag > AGENTAUDIT_MODEL env > credentials.json > provider default
     const modelArgIdx2 = process.argv.indexOf('--model');
     const modelFlag2 = modelArgIdx2 !== -1 ? process.argv[modelArgIdx2 + 1] : null;
     const modelOverride = modelFlag2 || process.env.AGENTAUDIT_MODEL || loadLlmConfig()?.llm_model || null;
-    if (activeLlm && modelOverride) activeLlm.model = modelOverride;
+    if (modelOverride) {
+      // Route through resolveModel() so slash-models go to OpenRouter, prefixes to native providers
+      activeLlm = resolveModel(modelOverride);
+    }
+    if (!activeLlm) {
+      activeLlm = resolveProvider();
+    }
   }
 
   if (!activeLlm) {
@@ -6313,7 +6318,16 @@ async function main() {
   }
   
   if (command === 'audit') {
-    const urls = targets.filter(t => !t.startsWith('--'));
+    // Extract URLs: skip option flags and their values
+    const optionsWithValues = new Set(['--model', '--verify', '--format', '--models']);
+    const urls = [];
+    for (let i = 0; i < targets.length; i++) {
+      if (targets[i].startsWith('--')) {
+        if (optionsWithValues.has(targets[i]) && i + 1 < targets.length) i++; // skip next (value)
+        continue;
+      }
+      urls.push(targets[i]);
+    }
     if (urls.length === 0) {
       console.log(`  ${c.red}Error: at least one repository URL required${c.reset}`);
       console.log(`  ${c.dim}Usage: ${c.cyan}agentaudit audit <url>${c.dim} — e.g. agentaudit audit https://github.com/owner/repo${c.reset}`);
