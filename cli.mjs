@@ -3002,7 +3002,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       return { report, text: _text, duration: Date.now() - start, truncated: geminiFinish === 'MAX_TOKENS' };
     } else {
       const headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-      if (llmConfig.provider === 'openrouter') { headers['HTTP-Referer'] = 'https://agentaudit.dev'; headers['X-Title'] = 'AgentAudit CLI'; }
+      if (llmConfig.provider === 'openrouter') { headers['HTTP-Referer'] = 'https://agentaudit.dev'; headers['X-Title'] = 'AgentAudit CLI'; headers['X-OpenRouter-Categories'] = 'cli-agent'; }
       const res = await fetch(llmConfig.url, {
         method: 'POST',
         headers,
