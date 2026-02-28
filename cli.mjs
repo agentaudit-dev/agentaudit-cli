@@ -852,17 +852,45 @@ function padLeft(str, len) {
   return diff > 0 ? ' '.repeat(diff) + str : str;
 }
 
+// Truncate a string with ANSI codes to maxLen visible characters
+function truncateAnsi(str, maxLen) {
+  if (maxLen <= 0) return '';
+  let vis = 0;
+  let result = '';
+  let i = 0;
+  while (i < str.length) {
+    if (str[i] === '\x1b') {
+      const m = str.slice(i).match(/^\x1b\[[0-9;]*[a-zA-Z]/);
+      if (m) { result += m[0]; i += m[0].length; continue; }
+    }
+    if (vis >= maxLen) break;
+    result += str[i];
+    vis++;
+    i++;
+  }
+  return result + c.reset;
+}
+
 function drawBox(title, contentLines, width) {
   const inner = width - 4; // 2 for "│ " + 2 for " │"
   const totalDash = inner + 2; // total horizontal line chars between corners
   const lines = [];
-  const titleStr = title ? ` ${title} ` : '';
-  const titleLen = visLen(titleStr);
+  let titleStr = title ? ` ${title} ` : '';
+  let titleLen = visLen(titleStr);
+  // Clamp title if wider than available border space
+  if (titleLen >= totalDash - 1) {
+    const maxTitle = Math.max(1, totalDash - 4);
+    titleStr = ` ${title.slice(0, maxTitle)}… `;
+    titleLen = visLen(titleStr);
+  }
   // Top: ╭─ Title ────────────╮  (1 dash before title + title + remaining dashes)
-  const topDash = BOX.h.repeat(Math.max(1, totalDash - 1 - titleLen));
+  const topDash = BOX.h.repeat(Math.max(0, totalDash - 1 - titleLen));
   lines.push(`  ${BOX.tl}${c.dim}${BOX.h}${c.reset}${c.bold}${titleStr}${c.reset}${c.dim}${topDash}${c.reset}${BOX.tr}`);
   for (const line of contentLines) {
-    lines.push(`  ${BOX.v} ${padRight(line, inner + 1)}${BOX.v}`);
+    // Truncate content that exceeds box inner width
+    const vl = visLen(line);
+    const display = vl > inner ? truncateAnsi(line, inner - 1) + '…' : line;
+    lines.push(`  ${BOX.v} ${padRight(display, inner + 1)}${BOX.v}`);
   }
   lines.push(`  ${BOX.bl}${c.dim}${BOX.h.repeat(totalDash)}${c.reset}${BOX.br}`);
   return lines;
@@ -4220,7 +4248,10 @@ function renderOverviewTab(data, width) {
       const idx = leaderboard.findIndex(e => e.agent_name === creds.agent_name);
       if (idx >= 0) rank = `#${idx + 1} of ${leaderboard.length}`;
     }
-    profileLines.push(`${c.bold}${creds.agent_name}${c.reset}${' '.repeat(Math.max(1, halfW - 14 - visLen(creds.agent_name) - visLen(rank)))}${c.dim}${rank}${c.reset}`);
+    const nameVis = visLen(creds.agent_name);
+    const rankVis = visLen(rank);
+    const nameGap = Math.max(1, halfW - nameVis - rankVis);
+    profileLines.push(`${c.bold}${creds.agent_name}${c.reset}${' '.repeat(nameGap)}${c.dim}${rank}${c.reset}`);
     profileLines.push(`Points     ${c.bold}${fmtNum(agent.total_points)}${c.reset}`);
     profileLines.push(`Audits     ${c.bold}${fmtNum(agent.total_reports)}${c.reset}`);
     profileLines.push(`Findings   ${c.bold}${fmtNum(agent.total_findings_submitted)}${c.reset} ${c.dim}(${fmtNum(agent.total_findings_confirmed)} confirmed)${c.reset}`);
@@ -4255,6 +4286,15 @@ function renderOverviewTab(data, width) {
     regLines.push(`${c.dim}Could not load registry stats${c.reset}`);
   }
 
+  // Local history stats
+  const localHistory = loadHistory(50);
+  const verifiedCount = localHistory.filter(h => h.verification).length;
+  const localStats = {
+    total: localHistory.length,
+    verified: verifiedCount,
+    lastAudit: localHistory[0] ? timeAgo(localHistory[0].timestamp || localHistory[0].date) : null,
+  };
+
   const boxW = halfW + 4;
   const profileBox = drawBox('Your Profile', profileLines, boxW);
   const registryBox = drawBox('Registry', regLines, boxW);
@@ -4262,14 +4302,37 @@ function renderOverviewTab(data, width) {
   // Side by side if wide enough, stacked otherwise
   if (width >= boxW * 2 + 4) {
     const maxLen = Math.max(profileBox.length, registryBox.length);
-    while (profileBox.length < maxLen) profileBox.push(`  ${BOX.v} ${' '.repeat(halfW + 1)}${BOX.v}`);
-    while (registryBox.length < maxLen) registryBox.push(`  ${BOX.v} ${' '.repeat(halfW + 1)}${BOX.v}`);
+    // Insert filler lines BEFORE the bottom border (last line), not after
+    while (profileBox.length < maxLen) {
+      profileBox.splice(profileBox.length - 1, 0, `  ${BOX.v} ${' '.repeat(halfW + 1)}${BOX.v}`);
+    }
+    while (registryBox.length < maxLen) {
+      registryBox.splice(registryBox.length - 1, 0, `  ${BOX.v} ${' '.repeat(halfW + 1)}${BOX.v}`);
+    }
     for (let i = 0; i < maxLen; i++) {
       lines.push(profileBox[i] + '  ' + registryBox[i].trimStart());
     }
   } else {
     lines.push(...profileBox, '', ...registryBox);
   }
+
+  // Local history section
+  lines.push('');
+  if (localStats.total > 0) {
+    const histParts = [`${c.bold}${localStats.total}${c.reset} local audits`];
+    if (localStats.verified > 0) histParts.push(`${c.green}${localStats.verified} verified${c.reset}`);
+    if (localStats.lastAudit) histParts.push(`${c.dim}last: ${localStats.lastAudit}${c.reset}`);
+    lines.push(`  ${c.dim}Local:${c.reset} ${histParts.join(`  ${c.dim}│${c.reset}  `)}`);
+  }
+
+  // Quick actions
+  lines.push('');
+  lines.push(`  ${c.bold}Quick Actions${c.reset}`);
+  lines.push(`  ${c.cyan}agentaudit audit <url>${c.reset}            ${c.dim}Deep LLM security audit${c.reset}`);
+  lines.push(`  ${c.cyan}agentaudit audit <url> --verify${c.reset}   ${c.dim}Audit + adversarial verification${c.reset}`);
+  lines.push(`  ${c.cyan}agentaudit audit <url> --remote${c.reset}   ${c.dim}Server-side scan (no API key)${c.reset}`);
+  lines.push(`  ${c.cyan}agentaudit consensus <pkg>${c.reset}        ${c.dim}Cross-model consensus view${c.reset}`);
+  lines.push(`  ${c.cyan}agentaudit search <query>${c.reset}         ${c.dim}Search the registry${c.reset}`);
 
   return lines;
 }
@@ -4292,7 +4355,7 @@ function renderLeaderboardTab(data, width, opts = {}) {
     const entry = leaderboard[i];
     const name = (entry.agent_name || '').slice(0, maxNameW);
     const isMe = creds && entry.agent_name === creds.agent_name;
-    const prefix = i < 3 ? ` ${medals[i]} ` : `  ${c.dim}#${String(i + 1).padStart(2)}${c.reset} `;
+    const prefix = i < 3 ? `  ${medals[i]}   ` : `  ${c.dim}#${String(i + 1).padStart(2)}${c.reset} `;
     const nameStr = isMe ? `${c.green}${c.bold}${name}${c.reset}` : name;
     const bar = renderBar(entry.total_points || 0, maxPts, barW);
     const pts = padLeft(`${fmtNum(entry.total_points || 0)} pts`, 12);
@@ -4724,7 +4787,7 @@ async function leaderboardCommand(args) {
     const entry = data[i];
     const name = (entry.agent_name || '').slice(0, 20);
     const isMe = creds && entry.agent_name === creds.agent_name;
-    const prefix = i < 3 ? ` ${medals[i]} ` : `  #${String(i + 1).padStart(2)}  `;
+    const prefix = i < 3 ? `  ${medals[i]}   ` : `  ${c.dim}#${String(i + 1).padStart(2)}${c.reset} `;
     const nameStr = isMe ? `${c.green}${c.bold}${name}${c.reset}` : name;
     const bar = renderBar(entry.total_points || 0, maxPts, barW);
     const pts = `${fmtNum(entry.total_points || 0)} pts`;
