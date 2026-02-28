@@ -2876,27 +2876,36 @@ async function safeJsonParse(res, llmConfig) {
 }
 
 function getMaxOutputTokens(model) {
-  // Known max_completion_tokens from provider docs / OpenRouter API
-  const limits = {
-    // Anthropic
-    'claude-haiku-4-5': 8192, 'claude-3-haiku': 4096, 'claude-3-5-haiku': 8192,
-    'claude-sonnet-4-6': 64000, 'claude-sonnet-4-5': 16384, 'claude-3-5-sonnet': 8192,
-    'claude-opus-4-6': 32768, 'claude-opus-4': 32768,
-    // Google Gemini (all current models support 65536)
-    'gemini-3': 65536, 'gemini-2.5': 65536, 'gemini-2.0': 65536,
-    // Qwen
-    'qwen3.5': 65536, 'qwen3': 32768, 'qwen2.5': 32768,
+  // Known max_completion_tokens from provider docs (2026-02)
+  // Array (not object) to guarantee match order — specific keys before generic ones
+  const limits = [
+    // Anthropic (specific versions first, then generic)
+    ['claude-haiku-4-5', 8192], ['claude-3-haiku', 4096], ['claude-3-5-haiku', 8192],
+    ['claude-sonnet-4-6', 64000], ['claude-sonnet-4-5', 16384], ['claude-3-5-sonnet', 8192], ['claude-sonnet-4', 16384],
+    ['claude-opus-4-6', 32768], ['claude-opus-4', 32768],
+    // Google Gemini
+    ['gemini-3', 65536], ['gemini-2.5', 65536], ['gemini-2.0', 65536],
+    // Qwen (OpenRouter)
+    ['qwen3.5', 65536], ['qwen3', 32768], ['qwen2.5', 32768],
     // xAI
-    'grok-4': 32768, 'grok-3': 16384,
+    ['grok-4', 32768], ['grok-3', 16384],
     // OpenAI
-    'gpt-4.1': 32768, 'gpt-4o': 16384, 'gpt-4-turbo': 4096,
-    'o3': 100000, 'o4-mini': 100000,
-  };
+    ['gpt-4.1', 32768], ['gpt-4o', 16384], ['gpt-4-turbo', 4096], ['o3', 100000], ['o4-mini', 100000],
+    // DeepSeek (8K standard mode — thinking mode allows 64K but we use standard)
+    ['deepseek', 8192],
+    // Mistral
+    ['mistral-large', 32768], ['mistral-medium', 32768], ['mistral-small', 32768],
+    // Meta Llama (served by Groq 32K, Together, Fireworks, Cerebras)
+    ['llama-3.3', 32768], ['llama-v3p3', 32768], ['llama-3.1', 32768], ['llama-v3p1', 32768],
+    ['llama-4', 32768], ['llama-3', 16384],
+    // Zhipu / z.ai
+    ['glm-4', 16384], ['glm-3', 8192],
+  ];
   const m = (model || '').toLowerCase();
-  for (const [key, val] of Object.entries(limits)) {
+  for (const [key, val] of limits) {
     if (m.includes(key)) return val;
   }
-  return 16384; // conservative fallback for unknown models
+  return 8192; // conservative fallback — safe for all providers
 }
 
 async function callLlm(llmConfig, systemPrompt, userMessage) {
