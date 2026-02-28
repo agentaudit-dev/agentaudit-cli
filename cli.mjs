@@ -2913,6 +2913,11 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
   if (!apiKey) return { error: `Missing API key: ${llmConfig.key}` };
   const start = Date.now();
 
+  // --timeout flag (seconds), default 180s (3 min)
+  const timeoutArgIdx = process.argv.indexOf('--timeout');
+  const timeoutSec = timeoutArgIdx !== -1 ? Math.max(30, Math.min(600, parseInt(process.argv[timeoutArgIdx + 1], 10) || 180)) : 180;
+  const timeoutMs = timeoutSec * 1000;
+
   // Context window warning
   const ctxCheck = checkContextLimit(llmConfig.model, systemPrompt, userMessage);
   if (ctxCheck) {
@@ -2920,6 +2925,17 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
     if (ctxCheck.pct > 100) {
       return { error: `Input too large (~${Math.round(ctxCheck.estimated/1000)}k tokens) for ${llmConfig.model} (${Math.round(ctxCheck.limit/1000)}k context limit). Try a smaller package or a model with a larger context window.` };
     }
+  }
+
+  // Live timer — updates every second while waiting for LLM
+  let liveTimer = null;
+  if (process.stdout.isTTY && !quietMode) {
+    liveTimer = setInterval(() => {
+      const secs = Math.round((Date.now() - start) / 1000);
+      const remaining = timeoutSec - secs;
+      const timerColor = remaining <= 30 ? c.yellow : c.dim;
+      process.stdout.write(`\r  ${stepProgress(4, 4)} Running LLM analysis ${c.dim}(${llmConfig.name})${c.reset} ${timerColor}${secs}s/${timeoutSec}s${c.reset}  `);
+    }, 1000);
   }
 
   let _text = '';
@@ -2930,7 +2946,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
         body: JSON.stringify({ model: llmConfig.model, max_tokens: getMaxOutputTokens(llmConfig.model), system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       data = await safeJsonParse(res, llmConfig);
       if (data.error) {
@@ -2963,7 +2979,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
           contents: [{ role: 'user', parts: [{ text: userMessage }] }],
           generationConfig: { maxOutputTokens: getMaxOutputTokens(llmConfig.model), responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 8192 } },
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       data = await safeJsonParse(res, llmConfig);
       if (data.error) {
@@ -2991,7 +3007,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         method: 'POST',
         headers,
         body: JSON.stringify({ model: llmConfig.model, max_tokens: getMaxOutputTokens(llmConfig.model), messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       data = await safeJsonParse(res, llmConfig);
       if (data.error) {
@@ -3017,9 +3033,11 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
     }
   } catch (err) {
     const dur = Date.now() - start;
-    if (err.name === 'TimeoutError' || err.message?.includes('timeout')) return { error: 'Request timed out (180s)', hint: 'Try again or use a faster model', duration: dur };
+    if (err.name === 'TimeoutError' || err.message?.includes('timeout')) return { error: `Request timed out (${timeoutSec}s)`, hint: `Increase timeout: --timeout ${timeoutSec * 2}`, duration: dur };
     if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED' || err.message?.includes('fetch failed')) return { error: `Network error: could not reach ${llmConfig.provider}`, hint: 'Check your internet connection', duration: dur };
     return { error: err.message, duration: dur };
+  } finally {
+    if (liveTimer) clearInterval(liveTimer);
   }
 }
 
@@ -3827,14 +3845,16 @@ async function auditRepo(url) {
 
   const llmResult = await callLlm(activeLlm, systemPrompt, userMessage);
 
+  // Clear live timer line and print final status
+  if (process.stdout.isTTY) process.stdout.write('\r\x1b[K');
   if (llmResult.error) {
-    console.log(` ${c.red}failed${c.reset}`);
+    console.log(`  ${stepProgress(4, 4)} Running LLM analysis ${c.dim}(${modelLabel})${c.reset} ${c.red}failed${c.reset} ${c.dim}(${elapsed(start)})${c.reset}`);
     console.log(`  ${c.red}${llmResult.error}${c.reset}`);
     if (llmResult.hint) console.log(`  ${c.dim}${llmResult.hint}${c.reset}`);
     return null;
   }
 
-  console.log(` ${c.green}done${c.reset} ${c.dim}(${elapsed(start)})${c.reset}`);
+  console.log(`  ${stepProgress(4, 4)} Running LLM analysis ${c.dim}(${modelLabel})${c.reset} ${c.green}done${c.reset} ${c.dim}(${elapsed(start)})${c.reset}`);
 
   if (llmResult.truncated) {
     console.log();
@@ -5243,11 +5263,13 @@ async function main() {
   // Strip global flags from args (including --model <value>, --format <value>)
   const globalFlags = new Set(['--json', '--quiet', '-q', '--no-color', '--no-upload', '--remote']);
   let args = rawArgs.filter(a => !globalFlags.has(a));
-  // Remove --model <value> and --models <value> pairs
+  // Remove --model <value>, --models <value>, --timeout <value> pairs
   const modelIdx = args.indexOf('--model');
   if (modelIdx !== -1) args.splice(modelIdx, 2);
   const modelsIdx = args.indexOf('--models');
   if (modelsIdx !== -1) args.splice(modelsIdx, 2);
+  const timeoutIdx = args.indexOf('--timeout');
+  if (timeoutIdx !== -1) args.splice(timeoutIdx, 2);
   // Remove --format <value> pair
   const formatIdx = args.indexOf('--format');
   const formatFlag = formatIdx !== -1 ? args.splice(formatIdx, 2)[1] : null;
@@ -5323,6 +5345,7 @@ async function main() {
       `                       <name> — specific model as verifier (e.g. sonnet)`,
       `  --no-verify        Disable verification (even if default)`,
       `  --remote           Use agentaudit.dev server (no LLM key needed, 3/day free)`,
+      `  --timeout <sec>    LLM request timeout in seconds (default: 180, max: 600)`,
       `  --model <name>     Override LLM model for this run`,
       `  --models <a,b,c>   Multi-model audit (parallel calls, consensus comparison)`,
       `  --no-upload        Skip uploading report to registry`,
