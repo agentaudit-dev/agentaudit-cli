@@ -994,11 +994,16 @@ function fmtPct(n) {
 
 function dashboardBanner() {
   const ver = getVersion();
+  const inner = 35;
+  const line1 = `  \u25C6  AgentAudit  v${ver}`;
+  const line2 = `  Security Registry for AI Agents`;
+  const pad1 = Math.max(0, inner - line1.length);
+  const pad2 = Math.max(0, inner - line2.length);
   return [
-    `  ${BOX.tl}${c.dim}${BOX.h.repeat(35)}${c.reset}${BOX.tr}`,
-    `  ${BOX.v}  ${c.bold}${c.cyan}◆  AgentAudit${c.reset}  ${c.dim}v${ver}${c.reset}${' '.repeat(Math.max(0, 19 - ver.length))}${BOX.v}`,
-    `  ${BOX.v}  ${c.dim}Security Registry for AI Agents${c.reset}  ${BOX.v}`,
-    `  ${BOX.bl}${c.dim}${BOX.h.repeat(35)}${c.reset}${BOX.br}`,
+    `  ${BOX.tl}${c.dim}${BOX.h.repeat(inner)}${c.reset}${BOX.tr}`,
+    `  ${BOX.v}${c.bold}${c.cyan}${line1}${c.reset}${' '.repeat(pad1)}${BOX.v}`,
+    `  ${BOX.v}${c.dim}${line2}${c.reset}${' '.repeat(pad2)}${BOX.v}`,
+    `  ${BOX.bl}${c.dim}${BOX.h.repeat(inner)}${c.reset}${BOX.br}`,
   ];
 }
 
@@ -4239,7 +4244,14 @@ async function fetchDashboardData() {
   return { stats, leaderboard, benchmark, agent, creds };
 }
 
-function renderOverviewTab(data, width) {
+const QUICK_ACTIONS = [
+  { key: 'a', label: 'Audit', arg: '<url>', desc: 'Deep LLM security audit', cmd: 'audit' },
+  { key: 'v', label: 'Audit --verify', arg: '<url>', desc: 'Audit + adversarial verification', cmd: 'audit-verify' },
+  { key: 'r', label: 'Remote scan', arg: '<url>', desc: 'Server-side scan (no API key)', cmd: 'remote' },
+  { key: 'c', label: 'Consensus', arg: '<pkg>', desc: 'Cross-model consensus view', cmd: 'consensus' },
+];
+
+function renderOverviewTab(data, width, quickActionIdx = -1) {
   const { stats, agent, leaderboard, creds } = data;
   const lines = [];
   const halfW = Math.min(Math.floor((width - 6) / 2), 40);
@@ -4330,14 +4342,17 @@ function renderOverviewTab(data, width) {
     lines.push(`  ${c.dim}Local:${c.reset} ${histParts.join(`  ${c.dim}│${c.reset}  `)}`);
   }
 
-  // Quick actions
+  // Quick actions (interactive)
   lines.push('');
-  lines.push(`  ${c.bold}Quick Actions${c.reset}`);
-  lines.push(`  ${c.cyan}agentaudit audit <url>${c.reset}            ${c.dim}Deep LLM security audit${c.reset}`);
-  lines.push(`  ${c.cyan}agentaudit audit <url> --verify${c.reset}   ${c.dim}Audit + adversarial verification${c.reset}`);
-  lines.push(`  ${c.cyan}agentaudit audit <url> --remote${c.reset}   ${c.dim}Server-side scan (no API key)${c.reset}`);
-  lines.push(`  ${c.cyan}agentaudit consensus <pkg>${c.reset}        ${c.dim}Cross-model consensus view${c.reset}`);
-  lines.push(`  ${c.cyan}agentaudit search <query>${c.reset}         ${c.dim}Search the registry${c.reset}`);
+  lines.push(`  ${c.bold}Quick Actions${c.reset}  ${c.dim}(press key or Enter to launch)${c.reset}`);
+  for (let i = 0; i < QUICK_ACTIONS.length; i++) {
+    const qa = QUICK_ACTIONS[i];
+    const isSel = i === quickActionIdx;
+    const pointer = isSel ? `${c.cyan}\u276F${c.reset}` : ' ';
+    const keyBadge = `${c.dim}[${c.reset}${c.cyan}${qa.key}${c.reset}${c.dim}]${c.reset}`;
+    const label = isSel ? `${c.bold}${c.cyan}${qa.label} ${qa.arg}${c.reset}` : `${qa.label} ${c.dim}${qa.arg}${c.reset}`;
+    lines.push(` ${pointer} ${keyBadge}  ${label}  ${c.dim}${qa.desc}${c.reset}`);
+  }
 
   return lines;
 }
@@ -4857,6 +4872,8 @@ async function dashboardCommand() {
   let activeTab = 0;
   let scrollOffset = 0;
   let running = true;
+  let quickActionIdx = 0; // selected quick action on overview tab
+  let pendingAction = null; // set when user triggers a quick action
 
   // Search tab state
   let searchQuery = '';
@@ -4922,7 +4939,7 @@ async function dashboardCommand() {
     let contentLines = [];
     switch (activeTab) {
       case 0:
-        contentLines = renderOverviewTab(data, cols);
+        contentLines = renderOverviewTab(data, cols, quickActionIdx);
         break;
       case 1:
         contentLines = renderLeaderboardTab(data, cols);
@@ -4951,9 +4968,12 @@ async function dashboardCommand() {
     output += '\n';
     const scrollInfo = contentLines.length > availableRows ? `  ${c.dim}[${scrollOffset + 1}-${Math.min(scrollOffset + availableRows, contentLines.length)}/${contentLines.length}]${c.reset}` : '';
     const isSearchTab = activeTab === 4;
+    const isOverviewTab = activeTab === 0;
     const footerHint = isSearchTab
       ? `${c.dim}\u2190\u2192 tab  Enter=search  Esc=clear  q quit${c.reset}`
-      : `${c.dim}\u2190\u2192 tab  \u2191\u2193 scroll  1-5 jump  q quit${c.reset}`;
+      : isOverviewTab
+        ? `${c.dim}\u2190\u2192 tab  \u2191\u2193 select  Enter=launch  a/v/r/c shortcut  q quit${c.reset}`
+        : `${c.dim}\u2190\u2192 tab  \u2191\u2193 scroll  1-5 jump  q quit${c.reset}`;
     output += `  ${footerHint}${scrollInfo}\n`;
 
     process.stdout.write(output);
@@ -5063,7 +5083,36 @@ async function dashboardCommand() {
       return;
     }
 
-    // Scroll
+    // Overview tab: quick action navigation + launch
+    if (activeTab === 0) {
+      // ↑↓ / j/k move quick action cursor
+      if (key === '\x1b[A' || key === 'k') {
+        quickActionIdx = (quickActionIdx - 1 + QUICK_ACTIONS.length) % QUICK_ACTIONS.length;
+        render();
+        return;
+      }
+      if (key === '\x1b[B' || key === 'j') {
+        quickActionIdx = (quickActionIdx + 1) % QUICK_ACTIONS.length;
+        render();
+        return;
+      }
+      // Enter: launch selected quick action
+      if (key === '\r' || key === '\n') {
+        pendingAction = QUICK_ACTIONS[quickActionIdx].cmd;
+        cleanup();
+        return;
+      }
+      // Letter shortcuts: a/v/r/c
+      const qaMatch = QUICK_ACTIONS.find(qa => qa.key === key);
+      if (qaMatch) {
+        pendingAction = qaMatch.cmd;
+        cleanup();
+        return;
+      }
+      return;
+    }
+
+    // Other tabs: scroll
     if (key === '\x1b[A' || key === 'k') { scrollOffset = Math.max(0, scrollOffset - 1); render(); return; }
     if (key === '\x1b[B' || key === 'j') { scrollOffset++; render(); return; }
     if (key === '\x1b[5~') { scrollOffset = Math.max(0, scrollOffset - 10); render(); return; }
@@ -5091,6 +5140,37 @@ async function dashboardCommand() {
       if (!running) { clearInterval(check); resolve(); }
     }, 100);
   });
+
+  // Handle pending quick action after dashboard exits
+  if (pendingAction) {
+    const qa = QUICK_ACTIONS.find(q => q.cmd === pendingAction);
+    const promptLabel = qa?.arg === '<pkg>' ? 'Package name' : 'URL to audit';
+    console.log();
+    const input = await askQuestion(`  ${c.cyan}${promptLabel}:${c.reset} `);
+    if (!input) {
+      console.log(`  ${c.dim}Cancelled.${c.reset}`);
+      return;
+    }
+    console.log();
+    // Build argv and re-enter main()
+    const newArgs = ['node', 'cli.mjs'];
+    switch (pendingAction) {
+      case 'audit':
+        newArgs.push('audit', input);
+        break;
+      case 'audit-verify':
+        newArgs.push('audit', input, '--verify', 'self');
+        break;
+      case 'remote':
+        newArgs.push('audit', input, '--remote');
+        break;
+      case 'consensus':
+        newArgs.push('consensus', input);
+        break;
+    }
+    process.argv = newArgs;
+    await main();
+  }
 }
 
 // ── Main ────────────────────────────────────────────────
