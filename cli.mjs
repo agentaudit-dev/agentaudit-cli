@@ -4152,6 +4152,7 @@ async function checkPackage(name) {
     if (!jsonMode) {
       console.log(`  ${c.yellow}Not found${c.reset} — package "${name}" hasn't been audited yet.`);
       console.log(`  ${c.dim}Run: agentaudit audit <repo-url> for a deep LLM audit${c.reset}`);
+      await suggestSimilarPackages(name);
     }
     return null;
   }
@@ -4590,6 +4591,31 @@ function renderSearchTab(searchState, width) {
   lines.push(`  ${c.dim}Type to search  \u2502  Enter=search  \u2502  Esc=clear  \u2502  Tab=switch tab${c.reset}`);
 
   return lines;
+}
+
+async function suggestSimilarPackages(slug) {
+  if (jsonMode || quietMode) return;
+  try {
+    const res = await fetch(`${REGISTRY_URL}/api/lookup?hash=${encodeURIComponent(slug)}`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    // API returns { reports: [...], findings: [...], total_matches }
+    const reports = data.reports || [];
+    if (reports.length === 0) return;
+    console.log();
+    console.log(`  ${c.dim}Did you mean one of these?${c.reset}`);
+    const shown = reports.slice(0, 5);
+    for (const p of shown) {
+      const name = p.skill_slug || p.slug || '?';
+      const risk = p.risk_score ?? 0;
+      const badge = risk === 0 ? `${c.green}safe${c.reset}` : risk <= 25 ? `${c.green}score ${100 - risk}${c.reset}` : risk <= 50 ? `${c.yellow}score ${100 - risk}${c.reset}` : `${c.red}score ${100 - risk}${c.reset}`;
+      console.log(`    ${c.cyan}${name}${c.reset}  ${badge}`);
+    }
+    if (data.total_matches > 5) console.log(`    ${c.dim}...and ${data.total_matches - 5} more${c.reset}`);
+    console.log(`  ${c.dim}Use: ${c.cyan}agentaudit search <query>${c.dim} to find packages${c.reset}`);
+  } catch { /* ignore */ }
 }
 
 async function searchCommand(args) {
@@ -5564,9 +5590,22 @@ async function main() {
         } else {
           console.log(`  ${c.red}API error (HTTP ${res.status})${c.reset}`);
         }
+        // Suggest similar packages via search
+        await suggestSimilarPackages(slug);
         return;
       }
       const data = await res.json();
+
+      // Check if package actually has any reports
+      if ((!data.total_reports && data.total_reports !== undefined) || (data.total_reports === 0 && (!data.findings || data.findings.length === 0))) {
+        if (jsonMode) { console.log(JSON.stringify(data, null, 2)); return; }
+        console.log(`  ${c.yellow}No reports found${c.reset} — "${slug}" hasn't been audited yet.`);
+        console.log(`  ${c.dim}Run: ${c.cyan}agentaudit audit <repo-url>${c.dim} to create the first audit${c.reset}`);
+        // Suggest similar packages
+        await suggestSimilarPackages(slug);
+        return;
+      }
+
       if (jsonMode) { console.log(JSON.stringify(data, null, 2)); return; }
 
       console.log();
