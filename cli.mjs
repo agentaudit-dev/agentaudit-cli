@@ -2896,7 +2896,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       const res = await fetch(llmConfig.url, {
         method: 'POST',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: llmConfig.model, max_tokens: 16384, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
+        body: JSON.stringify({ model: llmConfig.model, max_tokens: 32768, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
       data = await safeJsonParse(res, llmConfig);
@@ -2957,7 +2957,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       const res = await fetch(llmConfig.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: llmConfig.model, max_tokens: 16384, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
+        body: JSON.stringify({ model: llmConfig.model, max_tokens: 32768, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
       data = await safeJsonParse(res, llmConfig);
