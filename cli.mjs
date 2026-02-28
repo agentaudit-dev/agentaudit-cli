@@ -36,6 +36,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.resolve(__dirname);
 const REGISTRY_URL = 'https://agentaudit.dev';
 
+// ── Global error handlers — catch unhandled errors and exit cleanly ────
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`\nagentaudit: fatal error — ${err.message || err}\n`);
+  if (process.argv.includes('--debug')) process.stderr.write(`${err.stack || ''}\n`);
+  process.exit(2);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  process.stderr.write(`\nagentaudit: unhandled promise rejection — ${msg}\n`);
+  if (process.argv.includes('--debug') && reason instanceof Error) process.stderr.write(`${reason.stack || ''}\n`);
+  process.exit(2);
+});
+
 // ── Global flags (set in main before command routing) ────
 let jsonMode = false;
 let quietMode = false;
@@ -367,21 +380,23 @@ function multiSelect(items, { title = 'Select items', hint = 'Space=toggle  ↑�
     process.stdin.resume();
     process.stdin.setEncoding('utf8');
     
+    const cleanup = () => {
+      try { process.stdin.setRawMode(false); } catch {}
+      process.stdin.pause();
+      process.stdin.removeListener('data', onData);
+    };
+
     const onData = (key) => {
-      // Ctrl+C
+      // Ctrl+C — restore terminal state and exit cleanly
       if (key === '\x03') {
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        process.stdin.removeListener('data', onData);
+        cleanup();
         console.log();
-        process.exitCode = 0; return;
+        process.exit(0);
       }
       
       // Enter
       if (key === '\r' || key === '\n') {
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-        process.stdin.removeListener('data', onData);
+        cleanup();
         resolve(items.filter((_, i) => selected.has(i)).map(i => i.value));
         return;
       }
@@ -1001,23 +1016,34 @@ function formatApiError(error, provider, statusCode) {
   return null;
 }
 
+/**
+ * Validate that a parsed object looks like a valid audit report.
+ * Must have at least: findings (array) and one of skill_slug/risk_score/result.
+ */
+function isValidReportSchema(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (!Array.isArray(obj.findings)) return false;
+  // Must have at least one identifying field
+  if (!('skill_slug' in obj) && !('risk_score' in obj) && !('result' in obj)) return false;
+  return true;
+}
+
 function extractJSON(text) {
   // 1. Try parsing the entire text as JSON directly
-  try { return JSON.parse(text.trim()); } catch {}
-  
+  try {
+    const parsed = JSON.parse(text.trim());
+    if (isValidReportSchema(parsed)) return parsed;
+  } catch {}
+
   // 2. Strip markdown code fences — try last fence first (report is usually at the end)
   const fenceMatches = [...text.matchAll(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/g)];
   for (let i = fenceMatches.length - 1; i >= 0; i--) {
-    try { 
+    try {
       const parsed = JSON.parse(fenceMatches[i][1].trim());
-      if (parsed && typeof parsed === 'object' && ('risk_score' in parsed || 'findings' in parsed || 'result' in parsed)) return parsed;
+      if (isValidReportSchema(parsed)) return parsed;
     } catch {}
   }
-  // Try any fence even without report keys
-  for (let i = fenceMatches.length - 1; i >= 0; i--) {
-    try { return JSON.parse(fenceMatches[i][1].trim()); } catch {}
-  }
-  
+
   // 3. Find ALL balanced top-level { ... } blocks, try each (prefer largest valid one)
   const blocks = [];
   let searchFrom = 0;
@@ -1045,9 +1071,12 @@ function extractJSON(text) {
   // Try largest block first (the report JSON is usually the biggest)
   blocks.sort((a, b) => b.length - a.length);
   for (const block of blocks) {
-    try { return JSON.parse(block); } catch {}
+    try {
+      const parsed = JSON.parse(block);
+      if (isValidReportSchema(parsed)) return parsed;
+    } catch {}
   }
-  
+
   return null;
 }
 
@@ -1067,8 +1096,15 @@ const SKIP_EXTENSIONS = new Set([
   '.dylib', '.dll', '.exe', '.bin', '.dat', '.db', '.sqlite',
 ]);
 
-function collectFiles(dir, basePath = '', collected = [], totalSize = { bytes: 0 }) {
+function collectFiles(dir, basePath = '', collected = [], totalSize = { bytes: 0 }, _visitedPaths = new Set()) {
   if (totalSize.bytes >= MAX_TOTAL_SIZE) return collected;
+
+  // Symlink loop protection: resolve real path and track visited directories
+  let realDir;
+  try { realDir = fs.realpathSync(dir); } catch { return collected; }
+  if (_visitedPaths.has(realDir)) return collected;
+  _visitedPaths.add(realDir);
+
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
   catch { return collected; }
@@ -1077,15 +1113,24 @@ function collectFiles(dir, basePath = '', collected = [], totalSize = { bytes: 0
     if (totalSize.bytes >= MAX_TOTAL_SIZE) break;
     const relPath = basePath ? `${basePath}/${entry.name}` : entry.name;
     const fullPath = path.join(dir, entry.name);
+
+    // Skip symlinks that point to directories (prevent symlink traversal attacks)
+    if (entry.isSymbolicLink()) {
+      try {
+        const target = fs.realpathSync(fullPath);
+        if (fs.statSync(target).isDirectory()) continue; // skip symlinked dirs entirely
+      } catch { continue; }
+    }
+
     if (entry.isDirectory()) {
       // Special: scan .github/workflows/ (security-critical CI/CD files)
       if (entry.name === '.github') {
         const wfDir = path.join(fullPath, 'workflows');
-        try { if (fs.statSync(wfDir).isDirectory()) collectFiles(wfDir, relPath + '/workflows', collected, totalSize); } catch {}
+        try { if (fs.statSync(wfDir).isDirectory()) collectFiles(wfDir, relPath + '/workflows', collected, totalSize, _visitedPaths); } catch {}
         continue;
       }
       if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-      collectFiles(fullPath, relPath, collected, totalSize);
+      collectFiles(fullPath, relPath, collected, totalSize, _visitedPaths);
     } else {
       const ext = path.extname(entry.name).toLowerCase();
       if (SKIP_EXTENSIONS.has(ext)) continue;
@@ -2745,6 +2790,30 @@ function checkContextLimit(model, systemPrompt, userMessage) {
   return null;
 }
 
+/**
+ * Safely parse JSON from a fetch response. If the response is not JSON
+ * (e.g. HTML error page from a 502/503), returns {error: {message: ...}}
+ * which the callLlm error handling paths already handle.
+ */
+async function safeJsonParse(res, llmConfig) {
+  const contentType = res.headers.get('content-type') || '';
+  // Read body as text first — we can only consume the stream once
+  let body;
+  try { body = await res.text(); } catch { body = ''; }
+
+  if (!res.ok && !contentType.includes('application/json')) {
+    // Non-JSON error response (e.g. HTML from a proxy/gateway)
+    const preview = body.slice(0, 200).replace(/<[^>]+>/g, '').trim();
+    return { error: { message: `HTTP ${res.status} from ${llmConfig.provider}${preview ? ': ' + preview : ''}` } };
+  }
+  try {
+    return JSON.parse(body);
+  } catch (parseErr) {
+    const preview = body.slice(0, 200).replace(/<[^>]+>/g, '').trim();
+    return { error: { message: `Invalid JSON from ${llmConfig.provider} (HTTP ${res.status}): ${preview || parseErr.message}` } };
+  }
+}
+
 async function callLlm(llmConfig, systemPrompt, userMessage) {
   const apiKey = process.env[llmConfig.key];
   if (!apiKey) return { error: `Missing API key: ${llmConfig.key}` };
@@ -2769,7 +2838,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         body: JSON.stringify({ model: llmConfig.model, max_tokens: 16384, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
-      data = await res.json();
+      data = await safeJsonParse(res, llmConfig);
       if (data.error) {
         const friendly = formatApiError(data.error, llmConfig.provider, res.status);
         return { error: friendly?.text || data.error.message || JSON.stringify(data.error), hint: friendly?.hint, duration: Date.now() - start };
@@ -2789,7 +2858,10 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
       }
       return { report, text: _text, duration: Date.now() - start, truncated: data.stop_reason === 'max_tokens' };
     } else if (llmConfig.type === 'gemini') {
-      const res = await fetch(`${llmConfig.url}/${llmConfig.model}:generateContent?key=${apiKey}`, {
+      // NOTE: Google's Gemini API requires the API key as a URL query parameter.
+      // This is by design (their auth model). We never log the full URL to avoid key leakage.
+      const geminiUrl = `${llmConfig.url}/${llmConfig.model}:generateContent?key=${apiKey}`;
+      const res = await fetch(geminiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2799,7 +2871,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         }),
         signal: AbortSignal.timeout(180_000),
       });
-      data = await res.json();
+      data = await safeJsonParse(res, llmConfig);
       if (data.error) {
         const friendly = formatApiError(data.error, llmConfig.provider, res.status);
         return { error: friendly?.text || data.error.message || JSON.stringify(data.error), hint: friendly?.hint, duration: Date.now() - start };
@@ -2827,7 +2899,7 @@ async function callLlm(llmConfig, systemPrompt, userMessage) {
         body: JSON.stringify({ model: llmConfig.model, max_tokens: 16384, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMessage }] }),
         signal: AbortSignal.timeout(180_000),
       });
-      data = await res.json();
+      data = await safeJsonParse(res, llmConfig);
       if (data.error) {
         const friendly = formatApiError(data.error, llmConfig.provider, res.status);
         return { error: friendly?.text || data.error.message || JSON.stringify(data.error), hint: friendly?.hint, duration: Date.now() - start };
@@ -2919,7 +2991,23 @@ function enrichFindings(report, files, pkgInfo) {
     report.max_severity = report.findings.length > 0 ? maxSev : 'none';
   }
 
+  const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low', 'info']);
+
   for (const finding of report.findings) {
+    // 0. Validate & sanitize finding fields
+    // Severity: must be one of the known values
+    const sev = (finding.severity || '').toLowerCase();
+    finding.severity = VALID_SEVERITIES.has(sev) ? sev : 'medium';
+    // Line number: must be a positive integer
+    if (finding.line != null) {
+      const lineNum = parseInt(finding.line, 10);
+      finding.line = (Number.isFinite(lineNum) && lineNum > 0) ? lineNum : undefined;
+    }
+    // File path: reject suspicious characters (null bytes, .., protocol schemes)
+    if (finding.file && (/[\x00]|\.\.[\\/]|^[a-z]+:\/\//i.test(finding.file))) {
+      finding.file = undefined;
+    }
+
     // 1. Fill cwe_id from pattern_id lookup
     if (!finding.cwe_id || finding.cwe_id === '') {
       const prefix = (finding.pattern_id || '').replace(/_\d+$/, '');
@@ -3648,12 +3736,19 @@ async function remoteAudit(url) {
 
       for (const part of parts) {
         const eventMatch = part.match(/^event:\s*(.+)/m);
-        const dataMatch = part.match(/^data:\s*(.+)/m);
-        if (!eventMatch || !dataMatch) continue;
+        if (!eventMatch) continue;
+        // Accumulate all data: lines per SSE spec (data fields can span multiple lines)
+        const dataLines = [];
+        for (const line of part.split('\n')) {
+          const dm = line.match(/^data:\s?(.*)/);
+          if (dm) dataLines.push(dm[1]);
+        }
+        if (dataLines.length === 0) continue;
+        const dataStr = dataLines.join('\n');
 
         const event = eventMatch[1].trim();
         let data;
-        try { data = JSON.parse(dataMatch[1]); } catch { continue; }
+        try { data = JSON.parse(dataStr); } catch { continue; }
 
         switch (event) {
           case 'step': {
