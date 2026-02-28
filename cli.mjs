@@ -64,7 +64,7 @@ const LLM_PROVIDERS = [
   { key: 'DEEPSEEK_API_KEY',    name: 'DeepSeek',              provider: 'deepseek',    type: 'openai',    model: 'deepseek-chat',             url: 'https://api.deepseek.com/v1/chat/completions' },
   { key: 'MISTRAL_API_KEY',     name: 'Mistral',               provider: 'mistral',     type: 'openai',    model: 'mistral-large-latest',      url: 'https://api.mistral.ai/v1/chat/completions' },
   { key: 'GROQ_API_KEY',        name: 'Groq',                  provider: 'groq',        type: 'openai',    model: 'llama-3.3-70b-versatile',   url: 'https://api.groq.com/openai/v1/chat/completions' },
-  { key: 'XAI_API_KEY',         name: 'xAI (Grok)',            provider: 'xai',         type: 'openai',    model: 'grok-3',                    url: 'https://api.x.ai/v1/chat/completions' },
+  { key: 'XAI_API_KEY',         name: 'xAI (Grok)',            provider: 'xai',         type: 'openai',    model: 'grok-4',                    url: 'https://api.x.ai/v1/chat/completions' },
   { key: 'TOGETHER_API_KEY',    name: 'Together AI',           provider: 'together',    type: 'openai',    model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', url: 'https://api.together.xyz/v1/chat/completions' },
   { key: 'FIREWORKS_API_KEY',   name: 'Fireworks AI',          provider: 'fireworks',   type: 'openai',    model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', url: 'https://api.fireworks.ai/inference/v1/chat/completions' },
   { key: 'CEREBRAS_API_KEY',    name: 'Cerebras',              provider: 'cerebras',    type: 'openai',    model: 'llama-3.3-70b',             url: 'https://api.cerebras.ai/v1/chat/completions' },
@@ -78,15 +78,16 @@ const LLM_PROVIDERS = [
 const PROVIDER_MODELS = {
   anthropic: [
     { label: 'claude-sonnet-4-20250514', sublabel: 'fast + smart (default)', value: 'claude-sonnet-4-20250514' },
-    { label: 'claude-opus-4-20250514',   sublabel: 'most capable',           value: 'claude-opus-4-20250514' },
+    { label: 'claude-opus-4-20250514',   sublabel: 'best precision (recommended for audits)', value: 'claude-opus-4-20250514' },
   ],
   openai: [
     { label: 'gpt-4o',  sublabel: 'fast multimodal (default)', value: 'gpt-4o' },
-    { label: 'gpt-4.1', sublabel: 'latest',                    value: 'gpt-4.1' },
+    { label: 'gpt-4.1', sublabel: 'large context (low recall on audits)', value: 'gpt-4.1' },
   ],
   google: [
     { label: 'gemini-2.5-flash', sublabel: 'fast + cheap (default)', value: 'gemini-2.5-flash' },
-    { label: 'gemini-2.5-pro',   sublabel: 'most capable',          value: 'gemini-2.5-pro' },
+    { label: 'gemini-2.5-pro',   sublabel: 'strong reasoning',      value: 'gemini-2.5-pro' },
+    { label: 'gemini-3.1-pro',   sublabel: 'best detection (recommended for audits)', value: 'gemini-3.1-pro' },
   ],
   deepseek: [
     { label: 'deepseek-chat', sublabel: 'cost-effective (default)', value: 'deepseek-chat' },
@@ -98,7 +99,8 @@ const PROVIDER_MODELS = {
     { label: 'llama-3.3-70b-versatile', sublabel: 'ultra-fast (default)', value: 'llama-3.3-70b-versatile' },
   ],
   xai: [
-    { label: 'grok-3', sublabel: 'real-time knowledge (default)', value: 'grok-3' },
+    { label: 'grok-4', sublabel: 'best detection (default, recommended)', value: 'grok-4' },
+    { label: 'grok-3', sublabel: 'faster, lower cost',                    value: 'grok-3' },
   ],
   together: [
     { label: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', sublabel: 'open source (default)', value: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
@@ -267,6 +269,14 @@ function resolveProvider() {
 }
 
 function resolveModel(modelName) {
+  // Shorthand aliases for recommended models
+  const aliases = {
+    'opus': 'claude-opus-4-20250514',
+    'sonnet': 'claude-sonnet-4-20250514',
+    'gemini-3.1-pro': 'google/gemini-3.1-pro-preview',
+    'gemini-3.1-flash': 'google/gemini-3.1-flash-preview',
+  };
+  if (aliases[modelName.toLowerCase()]) modelName = aliases[modelName.toLowerCase()];
   // model with '/' → OpenRouter
   if (modelName.includes('/')) {
     const p = LLM_PROVIDERS.find(p => p.provider === 'openrouter' && process.env[p.key]);
@@ -2812,18 +2822,26 @@ Decision rules: code_exists=false→REJECTED; code_matches_description=false→R
 
 // Known context window sizes (input tokens) for common models
 const MODEL_CONTEXT_LIMITS = {
+  'claude-sonnet-4-6': 200000, 'claude-opus-4-6': 200000,
   'claude-sonnet-4': 200000, 'claude-opus-4': 200000, 'claude-haiku-4': 200000,
   'claude-3.5-sonnet': 200000, 'claude-3-haiku': 200000,
+  'gpt-4.1': 1047576, 'gpt-4.1-mini': 1047576, 'gpt-4.1-nano': 1047576,
   'gpt-4o': 128000, 'gpt-4o-mini': 128000, 'gpt-4-turbo': 128000, 'gpt-4': 8192,
+  'gemini-3.1-pro': 1048576, 'gemini-3.1-flash': 1048576,
   'gemini-2.5-flash': 1048576, 'gemini-2.5-pro': 1048576, 'gemini-2.0-flash': 1048576,
+  'grok-4': 256000, 'grok-3': 131072,
   'deepseek-chat': 64000, 'deepseek-reasoner': 64000,
   'mistral-large': 128000, 'mistral-small': 32000,
 };
 
 function estimateTokens(text) { return Math.ceil(text.length / 3.5); }
 
+// Sorted keys: longest first so "gpt-4.1" matches before "gpt-4", "claude-sonnet-4-6" before "claude-sonnet-4"
+const MODEL_LIMIT_KEYS = Object.keys(MODEL_CONTEXT_LIMITS).sort((a, b) => b.length - a.length);
+
 function checkContextLimit(model, systemPrompt, userMessage) {
-  const modelKey = Object.keys(MODEL_CONTEXT_LIMITS).find(k => model.toLowerCase().includes(k.toLowerCase()));
+  const stripped = model.replace(/^(anthropic|openai|google|openrouter|meta-llama|mistralai)\//i, '').toLowerCase();
+  const modelKey = MODEL_LIMIT_KEYS.find(k => stripped.includes(k.toLowerCase()));
   if (!modelKey) return null; // unknown model, skip check
   const limit = MODEL_CONTEXT_LIMITS[modelKey];
   const estimated = estimateTokens(systemPrompt) + estimateTokens(userMessage);
@@ -5285,7 +5303,7 @@ async function main() {
       `  agentaudit audit https://github.com/owner/repo --verify cross`,
       `  agentaudit audit https://github.com/owner/repo --remote`,
       `  agentaudit audit https://github.com/owner/repo --model gpt-4o`,
-      `  agentaudit audit https://github.com/owner/repo --models gemini-2.5-flash,claude-sonnet-4-20250514`,
+      `  agentaudit audit https://github.com/owner/repo --models opus,sonnet,grok-4,gemini-3.1-pro`,
       `  agentaudit audit https://github.com/owner/repo --format sarif > results.sarif`,
       `  agentaudit audit https://github.com/owner/repo --export`,
     ],
@@ -5565,7 +5583,7 @@ async function main() {
     console.log(`    agentaudit discover --quick`);
     console.log(`    agentaudit scan https://github.com/owner/repo`);
     console.log(`    agentaudit audit https://github.com/owner/repo`);
-    console.log(`    agentaudit audit <url> --models gemini-2.5-flash,claude-sonnet-4-20250514`);
+    console.log(`    agentaudit audit <url> --models opus,sonnet,grok-4,gemini-3.1-pro`);
     console.log(`    agentaudit lookup fastmcp --json`);
     console.log();
     console.log(`  ${c.bold}LEARN MORE${c.reset}`);
@@ -6086,6 +6104,13 @@ async function main() {
     } else {
       console.log(`  Active:  ${c.yellow}no provider configured${c.reset}`);
     }
+    console.log();
+    console.log(`  ${c.dim}Recommended for deep audits (validated on real-world CVEs):${c.reset}`);
+    console.log(`  ${c.dim}  Anthropic  claude-opus-4    — best precision${c.reset}`);
+    console.log(`  ${c.dim}  Anthropic  claude-sonnet-4  — best value${c.reset}`);
+    console.log(`  ${c.dim}  xAI        grok-4           — complementary detection${c.reset}`);
+    console.log(`  ${c.dim}  Google     gemini-3.1-pro   — deepest analysis${c.reset}`);
+    console.log(`  ${c.dim}  For multi-model consensus:  agentaudit audit <url> --models opus,sonnet,grok-4,gemini-3.1-pro${c.reset}`);
     console.log();
 
     // Step A: Provider selection
