@@ -3881,12 +3881,24 @@ async function auditRepo(url) {
   // ── Pass 2: Verification ──────────────────────────────
   const verifyArg = process.argv.find(a => a === '--verify' || a.startsWith('--verify='));
   const noVerify = process.argv.includes('--no-verify');
+  const noUploadFlag = process.argv.includes('--no-upload');
+
+  // Policy: verification is required for registry uploads.
+  // Auto-enable --verify self when uploading, unless user explicitly set --no-verify.
+  const wouldUpload = !noUploadFlag; // Upload happens unless --no-upload
+  let autoVerify = false;
+  if (wouldUpload && !verifyArg && !noVerify && report.findings && report.findings.length > 0) {
+    autoVerify = true;
+    console.log();
+    console.log(`  ${c.dim}ℹ Verification auto-enabled (required for registry uploads)${c.reset}`);
+    console.log(`  ${c.dim}  Use --no-verify to skip (disables upload too)${c.reset}`);
+  }
 
   let verificationResult = null;
-  if (verifyArg && !noVerify && report.findings && report.findings.length > 0) {
+  if ((verifyArg || autoVerify) && !noVerify && report.findings && report.findings.length > 0) {
     // Resolve verifier model
     let verifierConfig;
-    const verifyValue = verifyArg.includes('=') ? verifyArg.split('=')[1] : process.argv[process.argv.indexOf('--verify') + 1];
+    const verifyValue = autoVerify ? 'self' : (verifyArg.includes('=') ? verifyArg.split('=')[1] : process.argv[process.argv.indexOf('--verify') + 1]);
 
     if (verifyValue === 'cross') {
       // Cross-model: pick a different model than the scanner
@@ -3904,6 +3916,9 @@ async function auditRepo(url) {
 
     if (!verifierConfig) {
       console.log(`  ${c.yellow}⚠ Verification skipped: no API key for verifier model${c.reset}`);
+      if (autoVerify) {
+        console.log(`  ${c.yellow}⚠ Upload blocked: verification required for registry uploads${c.reset}`);
+      }
     } else {
       const verifyMode = verifierConfig === activeLlm ? 'self' : 'cross';
       const verifyLabel = `${verifierConfig.name} → ${verifierConfig.model}`;
@@ -3996,10 +4011,18 @@ async function auditRepo(url) {
   }
 
   // Upload to registry
-  const noUpload = process.argv.includes('--no-upload');
+  // Policy: verification required for registry uploads
+  // Block upload if: (1) --no-verify explicitly set, or (2) auto-verify enabled but verification didn't complete
+  const verificationCompleted = report.verification_pass === true;
+  const uploadBlocked = !noUploadFlag && (noVerify || (autoVerify && !verificationCompleted));
   let creds = loadCredentials();
-  if (noUpload) {
-    // Skip silently
+  if (noUploadFlag || uploadBlocked) {
+    if (uploadBlocked && noVerify) {
+      console.log(`  ${c.dim}ℹ Upload skipped (--no-verify disables registry upload)${c.reset}`);
+      console.log(`  ${c.dim}  Remove --no-verify to upload, or add --no-upload to suppress this message${c.reset}`);
+    } else if (uploadBlocked) {
+      console.log(`  ${c.dim}ℹ Upload skipped (verification failed — required for registry)${c.reset}`);
+    }
   } else if (creds) {
     await uploadReport(report, creds);
     console.log(`  ${c.dim}Report: ${REGISTRY_URL}/packages/${slug}${c.reset}`);
@@ -5336,19 +5359,20 @@ async function main() {
     audit: [
       `${c.bold}agentaudit audit${c.reset} <url> [url...] [options]`,
       ``,
-      `Deep LLM-powered security audit with optional verification pass.`,
+      `Deep LLM-powered security audit. Verification auto-enabled for registry uploads.`,
       ``,
       `${c.bold}Options:${c.reset}`,
       `  --verify [mode]    Enable Pass 2 verification (reduces false positives)`,
       `                       self   — same model verifies its own findings (default)`,
       `                       cross  — different model verifies (higher quality)`,
       `                       <name> — specific model as verifier (e.g. sonnet)`,
-      `  --no-verify        Disable verification (even if default)`,
+      `                     Auto-enabled when uploading to registry.`,
+      `  --no-verify        Skip verification AND registry upload (local-only scan)`,
       `  --remote           Use agentaudit.dev server (no LLM key needed, 3/day free)`,
       `  --timeout <sec>    LLM request timeout in seconds (default: 180, max: 600)`,
       `  --model <name>     Override LLM model for this run`,
       `  --models <a,b,c>   Multi-model audit (parallel calls, consensus comparison)`,
-      `  --no-upload        Skip uploading report to registry`,
+      `  --no-upload        Skip registry upload (verification still runs if --verify set)`,
       `  --export           Export audit payload as markdown (for manual LLM review)`,
       `  --format sarif      Output results as SARIF 2.1.0 (for GitHub Code Scanning)`,
       `  --debug            Show raw LLM response on parse errors`,

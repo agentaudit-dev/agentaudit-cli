@@ -209,8 +209,8 @@ Then ask your agent: *"Check which MCP servers I have installed and audit any un
 | `agentaudit discover --deep` | Discover + interactively select servers to deep-audit | `agentaudit discover --deep` |
 | `agentaudit scan <url>` | Quick regex-based static scan (~2s) | `agentaudit scan https://github.com/owner/repo` |
 | `agentaudit scan <url> --deep` | Deep audit (same as `audit`) | `agentaudit scan https://github.com/owner/repo --deep` |
-| `agentaudit audit <url>` | Deep LLM-powered 3-pass audit (~30s) | `agentaudit audit https://github.com/owner/repo` |
-| `agentaudit audit <url> --verify` | Audit + adversarial verification pass (reduces false positives) | `agentaudit audit <url> --verify self` |
+| `agentaudit audit <url>` | Deep LLM-powered 3-pass audit + verification (~45s) | `agentaudit audit https://github.com/owner/repo` |
+| `agentaudit audit <url> --verify cross` | Audit + cross-model verification (different model verifies) | `agentaudit audit <url> --verify cross` |
 | `agentaudit audit <url> --remote` | Server-side scan via agentaudit.dev (no LLM key needed, 3/day free) | `agentaudit audit <url> --remote` |
 | `agentaudit consensus <name>` | Cross-model consensus view for a package | `agentaudit consensus supabase-mcp` |
 | `agentaudit lookup <name>` | Look up package in trust registry | `agentaudit lookup fastmcp` |
@@ -243,8 +243,8 @@ Then ask your agent: *"Check which MCP servers I have installed and audit any un
 | `--no-color` | Disable ANSI colors (also respects `NO_COLOR` env var) |
 | `--model <name>` | Override LLM model for this run |
 | `--models <a,b,c>` | Multi-model audit (parallel calls, consensus comparison) |
-| `--verify <mode>` | Adversarial verification: `self` (same model), `cross` (different model), or `<model-name>` |
-| `--no-verify` | Skip verification even if configured |
+| `--verify <mode>` | Adversarial verification: `self` (same model), `cross` (different model), or `<model-name>`. Auto-enabled for registry uploads. |
+| `--no-verify` | Skip verification AND registry upload (local-only scan) |
 | `--remote` | Use agentaudit.dev server for scan (no local LLM key needed) |
 | `--no-upload` | Skip uploading report to registry |
 | `--export` | Export audit payload as markdown |
@@ -394,12 +394,19 @@ The deep audit (`agentaudit audit`) uses a structured 3-phase LLM analysis — n
 
 This architecture achieved **0% false positives** on our 11-package test set, down from 42% in v2.
 
-### Adversarial Verification Pass (v3.13+)
+### Adversarial Verification Pass (v3.14+)
 
-After the 3-pass audit, an optional **verification pass** re-examines each finding against the actual source code:
+After the 3-pass audit, a **verification pass** re-examines each finding against the actual source code. **Verification is auto-enabled when uploading to the registry** to ensure data quality. For local-only scans, use `--no-verify` to skip it (this also disables registry upload).
 
 ```bash
-agentaudit audit https://github.com/owner/repo --verify self
+# Verification runs automatically when uploading (default behavior)
+agentaudit audit https://github.com/owner/repo
+
+# Explicit verification mode
+agentaudit audit https://github.com/owner/repo --verify cross
+
+# Skip verification + upload (local-only, fast)
+agentaudit audit https://github.com/owner/repo --no-verify
 ```
 
 Each finding goes through a 5-point checklist:
@@ -410,6 +417,8 @@ Each finding goes through a 5-point checklist:
 5. **Fabrication Check** — Are there hallucinated details?
 
 Verdicts: `verified` (confirmed real), `demoted` (severity reduced), `rejected` (false positive removed).
+
+> **Why require verification for uploads?** LLMs can hallucinate code that doesn't exist or overstate severity. Without verification, false positives enter the public registry and unfairly flag packages as unsafe. The verification pass catches these before they become permanent records.
 
 ### Model Accuracy (Real-World Data)
 
